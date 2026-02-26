@@ -1,0 +1,19 @@
+{
+  "name": "interpulse",
+  "version": "0.1.0",
+  "description": "Session context monitoring — pressure tracking, token estimation, threshold warnings",
+  "author": {
+    "name": "MK"
+  },
+  "license": "MIT",
+  "keywords": [
+    "context-pressure",
+    "session-monitoring",
+    "token-estimation",
+    "threshold-warnings"
+  ],
+  "hooks": "./hooks/hooks.json",
+  "skills": [
+    "./skills/status"
+  ]
+}
