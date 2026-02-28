@@ -12,7 +12,6 @@
     "token-estimation",
     "threshold-warnings"
   ],
-  "hooks": "./hooks/hooks.json",
   "skills": [
     "./skills/status"
   ]
