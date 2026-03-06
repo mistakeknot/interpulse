@@ -1,6 +1,6 @@
 ---
-name: status
-description: Show current session pressure dashboard
+name: pressure
+description: Show current session context pressure dashboard — token usage, call count, threshold warnings. Not for code quality (use /intercheck:quality) or agent activity (use /intermux:agents).
 ---
 
 # Interpulse Status

@@ -12,7 +12,7 @@ Session state stored at `/tmp/interpulse-${SESSION_ID}.json`. Contains call coun
 
 ## Skill
 
-- `/interpulse:status` — Show current session pressure dashboard.
+- `/interpulse:pressure` — Show current session pressure dashboard.
 
 ## Pressure Model
 
