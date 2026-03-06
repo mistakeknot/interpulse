@@ -1,6 +1,6 @@
 {
   "name": "interpulse",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Session context monitoring — pressure tracking, token estimation, threshold warnings",
   "author": {
     "name": "MK"
