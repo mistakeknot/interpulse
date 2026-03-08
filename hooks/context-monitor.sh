@@ -1,12 +1,21 @@
 #!/usr/bin/env bash
 # Context monitor — tracks session pressure via tool call count, time decay,
-# heavy call weighting, and cumulative token estimation.
+# heavy call weighting, cumulative token estimation, AND real context window
+# remaining_percentage (when available from Claude Code).
 #
-# Thresholds (pressure OR tokens, whichever triggers first):
-#   Green  : pressure < 60,  tokens < 150k  — no output
-#   Yellow : pressure >= 60, tokens >= 150k  — moderate warning
-#   Orange : pressure >= 90, tokens >= 180k  — wrap up warning
-#   Red    : pressure >= 120, tokens >= 200k — auto-checkpoint + urgent warning
+# Dual-threshold: level = max(pressure_level, context_level)
+#   Pressure thresholds (heuristic):
+#     Green  : pressure < 60,  tokens < 150k  — no output
+#     Yellow : pressure >= 60, tokens >= 150k  — moderate warning
+#     Orange : pressure >= 90, tokens >= 180k  — wrap up warning
+#     Red    : pressure >= 120, tokens >= 200k — auto-checkpoint + urgent warning
+#   Context thresholds (ground truth, normalized for 16.5% autocompact buffer):
+#     Green  : usable > 35%
+#     Yellow : usable <= 35%
+#     Orange : usable <= 20%
+#     Red    : usable <= 10%
+#
+# Debounce: 5 tool calls between warnings. Severity escalation bypasses debounce.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -60,14 +69,63 @@ NEW_STATE=$(jq -n \
   '{calls:$calls, last_call_ts:$ts, pressure:$pressure, heavy_calls:$heavy, est_tokens:$tokens}')
 _ip_write_state "$SF" "$NEW_STATE"
 
-# Determine threshold level
-LEVEL=""
+# Determine pressure-based threshold level
+PRESSURE_LEVEL=""
 if (( EST_TOKENS > 200000 )) || awk "BEGIN{exit($PRESSURE > 120 ? 0 : 1)}" 2>/dev/null; then
-  LEVEL="red"
+  PRESSURE_LEVEL="red"
 elif (( EST_TOKENS > 180000 )) || awk "BEGIN{exit($PRESSURE > 90 ? 0 : 1)}" 2>/dev/null; then
-  LEVEL="orange"
+  PRESSURE_LEVEL="orange"
 elif (( EST_TOKENS > 150000 )) || awk "BEGIN{exit($PRESSURE > 60 ? 0 : 1)}" 2>/dev/null; then
-  LEVEL="yellow"
+  PRESSURE_LEVEL="yellow"
+fi
+
+# Determine context-window threshold level (ground truth when available)
+CONTEXT_REMAINING=$(_ip_context_remaining "$INPUT")
+CONTEXT_USABLE=""
+CONTEXT_LEVEL=""
+if [[ -n "$CONTEXT_REMAINING" ]]; then
+  CONTEXT_USABLE=$(_ip_normalize_usable_context "$CONTEXT_REMAINING")
+  CONTEXT_LEVEL=$(_ip_context_level "$CONTEXT_USABLE")
+fi
+
+# Dual-threshold: take the higher severity
+LEVEL=$(_ip_max_level "${PRESSURE_LEVEL:-}" "${CONTEXT_LEVEL:-}")
+
+# Debounce: 5 tool calls between warnings, severity escalation bypasses
+DEBOUNCE_FILE="/tmp/interpulse-debounce-${SID}.json"
+DEBOUNCE_CALLS=5
+if [[ -n "$LEVEL" ]]; then
+  _ip_db_counter=0
+  _ip_db_last_level=""
+  if [[ -f "$DEBOUNCE_FILE" ]]; then
+    _ip_db_counter=$(jq -r '.calls_since_warn // 0' "$DEBOUNCE_FILE" 2>/dev/null || echo 0)
+    _ip_db_last_level=$(jq -r '.last_level // empty' "$DEBOUNCE_FILE" 2>/dev/null)
+  fi
+  _ip_db_counter=$((_ip_db_counter + 1))
+
+  # Check for severity escalation (e.g., yellow→orange or orange→red)
+  _ip_escalated=false
+  if [[ -n "$_ip_db_last_level" && "$LEVEL" != "$_ip_db_last_level" ]]; then
+    _ip_cur_num=0; _ip_last_num=0
+    case "$LEVEL" in yellow) _ip_cur_num=1;; orange) _ip_cur_num=2;; red) _ip_cur_num=3;; esac
+    case "$_ip_db_last_level" in yellow) _ip_last_num=1;; orange) _ip_last_num=2;; red) _ip_last_num=3;; esac
+    [[ $_ip_cur_num -gt $_ip_last_num ]] && _ip_escalated=true
+  fi
+
+  # Suppress warning if within debounce window and not escalating
+  if [[ "$_ip_db_counter" -lt "$DEBOUNCE_CALLS" && "$_ip_escalated" == "false" && -n "$_ip_db_last_level" ]]; then
+    jq -n -c --argjson c "$_ip_db_counter" --arg l "${_ip_db_last_level}" \
+      '{calls_since_warn:$c, last_level:$l}' > "$DEBOUNCE_FILE" 2>/dev/null || true
+    LEVEL=""  # suppress this warning
+  else
+    # Reset debounce counter — warning will fire
+    jq -n -c --arg l "$LEVEL" '{calls_since_warn:0, last_level:$l}' > "$DEBOUNCE_FILE" 2>/dev/null || true
+  fi
+elif [[ -f "$DEBOUNCE_FILE" ]]; then
+  # Below all thresholds — increment counter but keep tracking
+  _ip_db_counter=$(jq -r '.calls_since_warn // 0' "$DEBOUNCE_FILE" 2>/dev/null || echo 0)
+  jq -n -c --argjson c "$((_ip_db_counter + 1))" --arg l "$(jq -r '.last_level // empty' "$DEBOUNCE_FILE" 2>/dev/null)" \
+    '{calls_since_warn:$c, last_level:$l}' > "$DEBOUNCE_FILE" 2>/dev/null || true
 fi
 
 # Write pressure level to interband for statusline and other consumers
@@ -86,12 +144,22 @@ done
 if [[ -n "$_ipm_ib_lib" ]]; then
   source "$_ipm_ib_lib" || true
 
+  _ipm_ib_ctx_args=()
+  if [[ -n "${CONTEXT_USABLE:-}" ]]; then
+    _ipm_ib_ctx_args+=(--argjson context_usable "$CONTEXT_USABLE")
+  fi
+  if [[ -n "${CONTEXT_REMAINING:-}" ]]; then
+    _ipm_ib_ctx_args+=(--argjson context_raw "$CONTEXT_REMAINING")
+  fi
+  # Use the pre-debounce level for interband (consumers want raw severity, not debounced)
+  _ipm_ib_raw_level=$(_ip_max_level "${PRESSURE_LEVEL:-}" "${CONTEXT_LEVEL:-}")
   _ipm_ib_payload=$(jq -n -c \
-    --arg level "${LEVEL:-green}" \
+    --arg level "${_ipm_ib_raw_level:-green}" \
     --argjson pressure "$PRESSURE" \
     --argjson est_tokens "$EST_TOKENS" \
     --argjson ts "$NOW" \
-    '{level:$level, pressure:$pressure, est_tokens:$est_tokens, ts:$ts}')
+    "${_ipm_ib_ctx_args[@]}" \
+    '{level:$level, pressure:$pressure, est_tokens:$est_tokens, ts:$ts} + (if $ARGS.named | has("context_usable") then {context_usable:$ARGS.named.context_usable} else {} end) + (if $ARGS.named | has("context_raw") then {context_raw:$ARGS.named.context_raw} else {} end)')
   _ipm_ib_file=$(interband_path "interpulse" "pressure" "$SID" 2>/dev/null) || _ipm_ib_file=""
   if [[ -n "$_ipm_ib_file" ]]; then
     interband_write "$_ipm_ib_file" "interpulse" "context_pressure" "$SID" "$_ipm_ib_payload" 2>/dev/null || true
@@ -107,10 +175,13 @@ case "$LEVEL" in
       echo "# Session Checkpoint (auto-generated)"
       echo "Session: $SID"
       echo "Pressure: $PRESSURE | Est. tokens: ~${EST_TOKENS}"
+      [[ -n "${CONTEXT_USABLE:-}" ]] && echo "Context window: ${CONTEXT_USABLE}% usable remaining (raw: ${CONTEXT_REMAINING}%)"
       echo "Tool calls: $CALLS ($HEAVY heavy)"
       echo "Time: $(date -Iseconds)"
     } > "$CHECKPOINT"
-    jq -n --arg msg "Context is near exhaustion (pressure: $PRESSURE, ~${EST_TOKENS} tokens). Checkpoint written to $CHECKPOINT. Commit your work and wrap up NOW." \
+    _ipm_ctx_detail=""
+    [[ -n "${CONTEXT_USABLE:-}" ]] && _ipm_ctx_detail=", context: ${CONTEXT_USABLE}% usable remaining"
+    jq -n --arg msg "Context is near exhaustion (pressure: $PRESSURE, ~${EST_TOKENS} tokens${_ipm_ctx_detail}). Checkpoint written to $CHECKPOINT. Commit your work and wrap up NOW." \
       '{"additionalContext": $msg}'
     ;;
   orange)
@@ -133,11 +204,15 @@ case "$LEVEL" in
         fi
       fi
     fi
-    jq -n --arg msg "Context pressure is high (pressure: $PRESSURE, ~${EST_TOKENS} tokens). Finish current work and commit. Avoid launching new subagents.${_ipm_checkpoint_msg}" \
+    _ipm_ctx_detail=""
+    [[ -n "${CONTEXT_USABLE:-}" ]] && _ipm_ctx_detail=", context: ${CONTEXT_USABLE}% usable remaining"
+    jq -n --arg msg "Context pressure is high (pressure: $PRESSURE, ~${EST_TOKENS} tokens${_ipm_ctx_detail}). Finish current work and commit. Avoid launching new subagents.${_ipm_checkpoint_msg}" \
       '{"additionalContext": $msg}'
     ;;
   yellow)
-    jq -n --arg msg "Context pressure is moderate (pressure: $PRESSURE, ~${EST_TOKENS} tokens). Consider wrapping up current task before starting new ones." \
+    _ipm_ctx_detail=""
+    [[ -n "${CONTEXT_USABLE:-}" ]] && _ipm_ctx_detail=", context: ${CONTEXT_USABLE}% usable remaining"
+    jq -n --arg msg "Context pressure is moderate (pressure: $PRESSURE, ~${EST_TOKENS} tokens${_ipm_ctx_detail}). Consider wrapping up current task before starting new ones." \
       '{"additionalContext": $msg}'
     ;;
 esac
