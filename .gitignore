@@ -13,3 +13,6 @@ __pycache__/
 .idea/
 .vscode/
 *.sw?
+
+# Human-approval marker for agent-mutated publishes (local-only)
+.publish-approved
