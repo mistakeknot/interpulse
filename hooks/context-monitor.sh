@@ -190,7 +190,7 @@ case "$LEVEL" in
     _ipm_checkpoint_msg=""
     _ipm_last_checkpoint="/tmp/interpulse-intermem-checkpoint-${SID}"
     _ipm_cp_lock="/tmp/interpulse-cp-lock-${SID}"
-    if [[ ! -f "$_ipm_last_checkpoint" || $(( NOW - $(stat -c %Y "$_ipm_last_checkpoint" 2>/dev/null || echo 0) )) -gt 900 ]]; then
+    if [[ ! -f "$_ipm_last_checkpoint" || $(( NOW - $(stat -c %Y "$_ipm_last_checkpoint" 2>/dev/null || stat -f %m "$_ipm_last_checkpoint" 2>/dev/null || echo 0) )) -gt 900 ]]; then
       if mkdir "$_ipm_cp_lock" 2>/dev/null; then
         touch "$_ipm_last_checkpoint" 2>/dev/null || true
         rmdir "$_ipm_cp_lock" 2>/dev/null || true
