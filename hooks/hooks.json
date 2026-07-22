@@ -7,7 +7,8 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/context-monitor.sh",
-            "timeout": 5
+            "timeout": 5,
+            "args": []
           }
         ]
       }
