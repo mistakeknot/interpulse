@@ -1,6 +1,6 @@
 # interpulse
 
-Session context monitoring for Claude Code.
+Session context monitoring for Claude Code, Codex, and Kimi Code.
 
 ## What this does
 
