@@ -1,0 +1,26 @@
+{
+  "name": "interpulse",
+  "version": "0.1.8",
+  "description": "Session context monitoring — pressure tracking, token estimation, threshold warnings",
+  "license": "MIT",
+  "keywords": [
+    "context-pressure",
+    "session-monitoring",
+    "token-estimation",
+    "threshold-warnings"
+  ],
+  "author": "MK",
+  "interface": {
+    "displayName": "interpulse",
+    "shortDescription": "Session context monitoring — pressure tracking, token estimation, threshold warnings"
+  },
+  "skills": "./skills/",
+  "hooks": [
+    {
+      "event": "PostToolUse",
+      "matcher": "Edit|Write|Bash|Agent",
+      "command": "${KIMI_PLUGIN_ROOT}/hooks/context-monitor.sh",
+      "timeout": 5
+    }
+  ]
+}
