@@ -92,15 +92,37 @@ fi
 # Dual-threshold: take the higher severity
 LEVEL=$(_ip_max_level "${PRESSURE_LEVEL:-}" "${CONTEXT_LEVEL:-}")
 
-# Debounce: 5 tool calls between warnings, severity escalation bypasses
+# Debounce: exponential backoff while a level PERSISTS; escalation bypasses.
+#
+# PERFORMANCE (fixed 2026-07-31, context-budget audit — bead Sylveste-qhy5):
+#   This was a flat 5-call debounce, which meant a session that reached a level
+#   re-warned every 5 tool calls for the rest of its life. Measured across the
+#   80 most recent transcripts: 4,362 emissions costing 222,765 est. tokens,
+#   and 89% of them were RED (3,883 emissions / 205,062 est. tok) — not the
+#   yellow steady state you would expect.
+#
+#   That is a feedback loop: each "context is nearly exhausted" warning
+#   consumes the very context it is warning about, which raises pressure,
+#   which triggers the next warning. The monitor was one of the largest
+#   context consumers on the box, worst exactly when context was scarcest.
+#
+#   Repetition does not add information. If three RED warnings did not change
+#   behaviour, the 776th will not either. So the gap now DOUBLES each time the
+#   same level repeats — 5, 10, 20, 40, capped at 80 — while any escalation
+#   (yellow→orange→red) still fires immediately at full urgency. First warnings
+#   stay as loud as before; only the dead tail is removed.
 DEBOUNCE_FILE="/tmp/interpulse-debounce-${SID}.json"
 DEBOUNCE_CALLS=5
+DEBOUNCE_GRACE=2   # warnings at a level that keep the original 5-call cadence
+DEBOUNCE_MAX=80
 if [[ -n "$LEVEL" ]]; then
   _ip_db_counter=0
   _ip_db_last_level=""
+  _ip_db_warns=0
   if [[ -f "$DEBOUNCE_FILE" ]]; then
     _ip_db_counter=$(jq -r '.calls_since_warn // 0' "$DEBOUNCE_FILE" 2>/dev/null || echo 0)
     _ip_db_last_level=$(jq -r '.last_level // empty' "$DEBOUNCE_FILE" 2>/dev/null)
+    _ip_db_warns=$(jq -r '.warns_at_level // 0' "$DEBOUNCE_FILE" 2>/dev/null || echo 0)
   fi
   _ip_db_counter=$((_ip_db_counter + 1))
 
@@ -113,20 +135,42 @@ if [[ -n "$LEVEL" ]]; then
     [[ $_ip_cur_num -gt $_ip_last_num ]] && _ip_escalated=true
   fi
 
-  # Suppress warning if within debounce window and not escalating
-  if [[ "$_ip_db_counter" -lt "$DEBOUNCE_CALLS" && "$_ip_escalated" == "false" && -n "$_ip_db_last_level" ]]; then
+  # Escalation resets the backoff; a persisting level doubles the gap each warning.
+  if [[ "$_ip_escalated" == "true" ]]; then
+    _ip_db_warns=0
+  fi
+  # The first DEBOUNCE_GRACE warnings at a level keep the original 5-call
+  # cadence — an operator acting on a RED warning should not have to wait
+  # longer for the reminder than they used to. Only after that does the gap
+  # start doubling, which is where the dead tail lives.
+  _ip_db_shift=0
+  if [[ "$_ip_db_warns" -gt "$DEBOUNCE_GRACE" ]]; then
+    _ip_db_shift=$(( _ip_db_warns - DEBOUNCE_GRACE ))
+    [[ "$_ip_db_shift" -gt 4 ]] && _ip_db_shift=4
+  fi
+  _ip_db_required=$(( DEBOUNCE_CALLS << _ip_db_shift ))
+  [[ "$_ip_db_required" -gt "$DEBOUNCE_MAX" ]] && _ip_db_required="$DEBOUNCE_MAX"
+
+  # Suppress warning if within the (backed-off) debounce window and not escalating
+  if [[ "$_ip_db_counter" -lt "$_ip_db_required" && "$_ip_escalated" == "false" && -n "$_ip_db_last_level" ]]; then
     jq -n -c --argjson c "$_ip_db_counter" --arg l "${_ip_db_last_level}" \
-      '{calls_since_warn:$c, last_level:$l}' > "$DEBOUNCE_FILE" 2>/dev/null || true
+      --argjson w "$_ip_db_warns" \
+      '{calls_since_warn:$c, last_level:$l, warns_at_level:$w}' > "$DEBOUNCE_FILE" 2>/dev/null || true
     LEVEL=""  # suppress this warning
   else
-    # Reset debounce counter — warning will fire
-    jq -n -c --arg l "$LEVEL" '{calls_since_warn:0, last_level:$l}' > "$DEBOUNCE_FILE" 2>/dev/null || true
+    # Reset debounce counter — warning will fire, and the next gap gets longer
+    jq -n -c --arg l "$LEVEL" --argjson w "$((_ip_db_warns + 1))" \
+      '{calls_since_warn:0, last_level:$l, warns_at_level:$w}' > "$DEBOUNCE_FILE" 2>/dev/null || true
   fi
 elif [[ -f "$DEBOUNCE_FILE" ]]; then
-  # Below all thresholds — increment counter but keep tracking
+  # Below all thresholds — increment counter, keep tracking, and let the backoff
+  # decay so a level re-entered after a calm stretch warns promptly again.
   _ip_db_counter=$(jq -r '.calls_since_warn // 0' "$DEBOUNCE_FILE" 2>/dev/null || echo 0)
+  _ip_db_warns=$(jq -r '.warns_at_level // 0' "$DEBOUNCE_FILE" 2>/dev/null || echo 0)
+  [[ "$_ip_db_warns" -gt 0 ]] && _ip_db_warns=$((_ip_db_warns - 1))
   jq -n -c --argjson c "$((_ip_db_counter + 1))" --arg l "$(jq -r '.last_level // empty' "$DEBOUNCE_FILE" 2>/dev/null)" \
-    '{calls_since_warn:$c, last_level:$l}' > "$DEBOUNCE_FILE" 2>/dev/null || true
+    --argjson w "$_ip_db_warns" \
+    '{calls_since_warn:$c, last_level:$l, warns_at_level:$w}' > "$DEBOUNCE_FILE" 2>/dev/null || true
 fi
 
 # Write pressure level to interband for statusline and other consumers
