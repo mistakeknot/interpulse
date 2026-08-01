@@ -1,6 +1,6 @@
 {
   "name": "interpulse",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Session context monitoring — pressure tracking, token estimation, threshold warnings",
   "license": "MIT",
   "keywords": [
