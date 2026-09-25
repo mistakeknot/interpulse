@@ -136,11 +136,17 @@ Written to `~/.interband/interpulse/pressure/${SESSION_ID}.json` for statusline 
 - `_ip_normalize_usable_context` — normalize raw % to usable % (accounting for 16.5% buffer)
 - `_ip_context_level` — map usable remaining % to severity level
 - `_ip_max_level` — return the higher severity of two levels
+- `_ip_transcript_path` — extract `transcript_path` from hook stdin JSON
+- `_ip_transcript_tokens` — real transcript context tokens + model, from a bounded tail read; shared by both hooks so they always agree on the same absolute number
+- `_ip_absolute_band` — 25k-token band index above a fixed threshold (empty when below it)
 
-Guards against double-loading. Sourced by both the hook and skill scripts.
+Guards against double-loading. Sourced by both hooks and skill scripts.
 
-### Hook
-`hooks/context-monitor.sh` — PostToolUse hook, fires on `Edit|Write|Bash|Task|NotebookEdit|MultiEdit`. Timeout: 5s. Registered in `hooks/hooks.json` (separate from plugin.json).
+### Hooks
+- `hooks/context-monitor.sh` — PostToolUse hook, fires on `Edit|Write|Bash|Task|NotebookEdit|MultiEdit`. Timeout: 5s.
+- `hooks/coordinator-handoff.sh` — Stop hook. Timeout: 5s.
+
+Both registered in `hooks/hooks.json` (separate from plugin.json).
 
 ## Integration Points
 
