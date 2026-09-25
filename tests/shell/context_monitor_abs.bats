@@ -38,6 +38,13 @@ hook_input() {  # $1 = transcript path (or empty), $2 = tool_output length fille
         '{session_id: $sid, tool_name: "Read", tool_output: $out} + (if $ARGS.named | has("t") then {transcript_path: $ARGS.named.t} else {} end)'
 }
 
+# Same as hook_input but reads a large tool_output from a file (--rawfile),
+# avoiding an ARG_MAX failure from a very long --arg value.
+hook_input_big_output() {  # $1 = transcript path, $2 = tool_output file
+    jq -n --arg t "$1" --arg sid "$SID" --rawfile out "$2" \
+        '{session_id: $sid, tool_name: "Read", tool_output: $out, transcript_path: $t}'
+}
+
 @test "context-monitor abs: no transcript_path leaves existing green behavior untouched" {
     run bash "$HOOK" <<< "$(hook_input "" "small")"
     [ "$status" -eq 0 ]
