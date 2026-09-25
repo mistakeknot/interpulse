@@ -184,13 +184,61 @@ _persist_band() {
     printf '%s' "$band" > "$BAND_FILE" 2>/dev/null || true
 }
 
+# Locate an installed Clavain's scripts/coordinator-model.sh when the plain
+# name isn't on PATH. Established pattern, not invented here:
+#   1. installed_plugins.json's "clavain@<marketplace>" installPath -- the
+#      same lookup Clavain's own hooks/release-canary-check.sh does against
+#      that file (installPath existence + a parseable plugin.json).
+#   2. Failing that, the plugin-cache glob interline's scripts/statusline.sh
+#      already uses to find Clavain's version
+#      (~/.claude/plugins/cache/*/clavain/*), taking the most recently
+#      modified match.
+# Overridable for tests via CLAVAIN_INSTALLED_FILE (matches
+# release-canary-check.sh's own override name) and CLAUDE_PLUGIN_CACHE_ROOT
+# (matches scripts/check-install-updates.sh's override name). Prints nothing
+# and returns non-zero if no usable coordinator-model.sh is found.
+find_clavain_coordinator_model() {
+    local installed_file="${CLAVAIN_INSTALLED_FILE:-$HOME/.claude/plugins/installed_plugins.json}"
+    local cache_root="${CLAUDE_PLUGIN_CACHE_ROOT:-$HOME/.claude/plugins/cache}"
+    local root="" candidate
+
+    if command -v jq >/dev/null 2>&1 && [[ -f "$installed_file" ]]; then
+        root="$(jq -r '
+            .plugins // {} | to_entries[]
+            | select(.key | test("^clavain@"))
+            | .value[0].installPath // empty
+        ' "$installed_file" 2>/dev/null | head -1)" || root=""
+    fi
+
+    if [[ -z "$root" || ! -d "$root" ]]; then
+        root=""
+        for candidate in $(ls -td "$cache_root"/*/clavain/* 2>/dev/null); do
+            [[ -d "$candidate" ]] || continue
+            root="$candidate"
+            break
+        done
+    fi
+
+    [[ -n "$root" && -f "$root/scripts/coordinator-model.sh" ]] || return 1
+    printf '%s\n' "$root/scripts/coordinator-model.sh"
+}
+
 # Resolve the coordinator model by calling Clavain's scripts/coordinator-model.sh
 # as an external command -- never reimplemented here. Always returns a usable
 # "<provider> <model>" pair; never leaves the caller without one, and never
 # an Opus-class model.
 resolve_coordinator_model() {
-    local cmd="${CLAVAIN_COORDINATOR_MODEL_CMD:-coordinator-model.sh}"
+    local cmd="${CLAVAIN_COORDINATOR_MODEL_CMD:-}"
     local resolved="" provider model
+
+    if [[ -z "$cmd" ]]; then
+        cmd="coordinator-model.sh"
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            local found=""
+            found="$(find_clavain_coordinator_model)" || found=""
+            [[ -n "$found" ]] && cmd="$found"
+        fi
+    fi
 
     if command -v "$cmd" >/dev/null 2>&1; then
         if command -v timeout >/dev/null 2>&1; then
