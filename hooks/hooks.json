@@ -12,6 +12,18 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/coordinator-handoff.sh",
+            "timeout": 5,
+            "args": []
+          }
+        ]
+      }
     ]
   }
 }
