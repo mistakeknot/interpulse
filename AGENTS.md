@@ -100,6 +100,15 @@ Reads `context_window.remaining_percentage` from PostToolUse stdin JSON and norm
 - Severity escalation (e.g., yellow→orange, orange→red) bypasses debounce and fires immediately
 - Debounce state stored at `/tmp/interpulse-debounce-${SESSION_ID}.json`
 
+### Absolute Real-Context Threshold (independent of the two signals above)
+
+`hooks/context-monitor.sh` (PostToolUse) and `hooks/coordinator-handoff.sh` (Stop) both measure the REAL transcript context via `lib/interpulse-lib.sh`'s `_ip_transcript_tokens` — the last main-chain assistant record's `input_tokens + cache_creation_input_tokens + cache_read_input_tokens` — and compare it against a fixed **absolute** token count (`INTERPULSE_COORD_CONTEXT_TOKENS`, default 100000), never a percentage of the window. This is deliberate: on a 1M-token model, 150k real tokens is only ~15% used and never trips the percentage-based bands above.
+
+- `context-monitor.sh` reports a crossing once per 25k-token band as `additionalContext`, independent of (and in addition to) its heuristic pressure/context-window level — it can fire while the heuristic level is still green.
+- `coordinator-handoff.sh` (Stop) makes this a `{"decision":"block", ...}` for a bb **coordinator** thread (marked via `bb handoff coordinator status --self --json`, or has non-archived children), and an advisory `systemMessage` for a **worker** thread. Blocking re-fires once per 25k-token band past the threshold (100k, 125k, 150k, …), not on every Stop.
+- The coordinator model name in the directive comes from Clavain's `scripts/coordinator-model.sh`, called as an external command (never reimplemented here) via `CLAVAIN_COORDINATOR_MODEL_CMD` (default `coordinator-model.sh`, resolved on `PATH`). If that command is missing or fails, this hook falls back to the hardcoded pair `claude-code claude-sonnet-5` and never emits an Opus-class model for this role.
+- State (the per-session band file) is written only after a full determination completes for that Stop — never before or during a bb lookup that outcome depends on — so a transient bb failure never freezes a band as "checked" for the rest of its 25k tokens. See the header comment in `hooks/coordinator-handoff.sh` for the full rationale.
+
 ## Session State
 
 Ephemeral file at `/tmp/interpulse-${SESSION_ID}.json`:
