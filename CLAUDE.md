@@ -4,12 +4,15 @@ Session context monitoring — dual-threshold pressure tracking with context win
 
 ## Hooks
 
-- `hooks/context-monitor.sh` — Dual-threshold context monitor. Combines heuristic pressure (call count + time decay + token estimate) with real `context_window.remaining_percentage` from Claude Code. Warns at Yellow/Orange/Red thresholds. Debounces warnings (5 calls between repeats, severity escalation bypasses). Auto-checkpoints at Red.
+- `hooks/context-monitor.sh` (PostToolUse) — Dual-threshold context monitor. Combines heuristic pressure (call count + time decay + token estimate) with real `context_window.remaining_percentage` from Claude Code. Warns at Yellow/Orange/Red thresholds. Debounces warnings (5 calls between repeats, severity escalation bypasses). Auto-checkpoints at Red. ALSO tracks/reports the same absolute real-context threshold as the Stop hook below (see "Absolute Real-Context Threshold"), as an additional, independent signal — it does not replace or alter the heuristic bands.
+- `hooks/coordinator-handoff.sh` (Stop) — nudges bb coordinator/worker threads to hand off once REAL transcript context crosses an absolute token threshold (default 100000, not a percentage of the model's window). Coordinators (bb-marked, or holding non-archived children) get a blocking `{"decision":"block",...}` naming the exact `bb handoff` commands; workers get an advisory `systemMessage`. Fires once per 25k-token band past the threshold. Resolves the coordinator's model by calling Clavain's `scripts/coordinator-model.sh` externally (never Opus, falls back to `claude-sonnet-5` if that command is unavailable).
 
 ## State
 
 - Session state: `/tmp/interpulse-${SESSION_ID}.json` — call count, pressure score, estimated tokens, heavy call count.
 - Debounce state: `/tmp/interpulse-debounce-${SESSION_ID}.json` — calls since last warning, last severity level.
+- Absolute-threshold band state (context-monitor.sh): `/tmp/interpulse-absband-${SESSION_ID}`.
+- Coordinator-handoff band state (coordinator-handoff.sh): `${INTERPULSE_COORD_STATE_DIR:-~/.interpulse/coordinator-handoff}/${SESSION_ID}.band` — written only after a full per-Stop determination completes, never before or during a bb lookup (see the header comment in the hook for why: a transient bb failure must not freeze a band as "checked").
 
 ## Skill
 
