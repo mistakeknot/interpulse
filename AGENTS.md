@@ -13,7 +13,7 @@
 | Repo | `https://github.com/mistakeknot/interpulse` |
 | Namespace | `interpulse:` |
 | Manifest | `.claude-plugin/plugin.json` |
-| Components | 1 skill, 0 commands, 0 agents, 1 hook (PostToolUse), 2 scripts |
+| Components | 1 skill, 0 commands, 0 agents, 2 hooks (PostToolUse, Stop), 2 scripts |
 | License | MIT |
 
 ### Release workflow

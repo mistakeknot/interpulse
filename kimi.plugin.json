@@ -21,6 +21,11 @@
       "matcher": "Edit|Write|Bash|Agent",
       "command": "${KIMI_PLUGIN_ROOT}/hooks/context-monitor.sh",
       "timeout": 5
+    },
+    {
+      "event": "Stop",
+      "command": "${KIMI_PLUGIN_ROOT}/hooks/coordinator-handoff.sh",
+      "timeout": 5
     }
   ]
 }
