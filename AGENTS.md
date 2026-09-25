@@ -43,16 +43,19 @@ interpulse/
 ├── skills/
 │   └── status/SKILL.md           # Pressure dashboard
 ├── hooks/
-│   ├── hooks.json                # PostToolUse registration
-│   └── context-monitor.sh        # Pressure tracker with warn/checkpoint logic
+│   ├── hooks.json                # PostToolUse + Stop registration
+│   ├── context-monitor.sh        # Pressure tracker with warn/checkpoint logic + absolute real-context reporting
+│   └── coordinator-handoff.sh    # Stop hook: bb coordinator/worker handoff nudge at an absolute token threshold
 ├── lib/
-│   └── interpulse-lib.sh         # Shared state management (_ip_session_id, _ip_state_file, etc.)
+│   └── interpulse-lib.sh         # Shared state management + transcript token measurement
 ├── scripts/
 │   ├── bump-version.sh
 │   └── validate-gitleaks-waivers.sh
 ├── tests/
 │   ├── pyproject.toml
-│   └── structural/
+│   ├── structural/
+│   ├── shell/                    # bats tests for the hooks (coordinator-handoff, context-monitor abs extension)
+│   └── fixtures/coordinator-handoff/
 ├── CLAUDE.md
 ├── AGENTS.md                     # This file
 ├── PHILOSOPHY.md
