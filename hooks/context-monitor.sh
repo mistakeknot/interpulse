@@ -16,6 +16,24 @@
 #     Red    : usable <= 10%
 #
 # Debounce: 5 tool calls between warnings. Severity escalation bypasses debounce.
+#
+# ABSOLUTE real-context tracking (added alongside the two heuristic signals
+# above, neither of which it replaces): both percentage-based thresholds
+# scale with the model's context WINDOW SIZE, so on a 1M-token model a
+# genuinely large coordinator burn (e.g. 150k real tokens) is still only
+# ~15% used and never reaches even Yellow. hooks/coordinator-handoff.sh (the
+# Stop hook) makes its blocking/advisory decision on a fixed ABSOLUTE token
+# count instead (default 100000, see INTERPULSE_COORD_CONTEXT_TOKENS). This
+# monitor now ALSO measures that same absolute number from the transcript
+# (via lib/interpulse-lib.sh's _ip_transcript_tokens, the identical function
+# the Stop hook uses, so both mechanisms agree on the same figure) and
+# reports it once per 25k-token band past the threshold -- as an
+# additionalContext note, same as the existing heuristic warnings, never a
+# block (PostToolUse has no coordinator/worker distinction to make; that
+# decision belongs to the Stop hook). Reported independently of the
+# pressure/context bands above: a session can be RED on tokens 1 & 2 while
+# still green here (small window, low absolute count) or green above while
+# past the absolute threshold here (huge window, six-figure real count).
 set -uo pipefail
 trap 'exit 0' ERR
 
