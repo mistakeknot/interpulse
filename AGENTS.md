@@ -29,6 +29,8 @@ scripts/bump-version.sh <version>   # bump, commit, push, publish
 
 **Solution:** PostToolUse hook uses dual-threshold logic: `level = max(pressure_level, context_level)`. Pressure tracks tool call weight with time decay. Context reads Claude Code's `context_window.remaining_percentage` and normalizes for the 16.5% autocompact buffer. Either metric can trigger warnings. Debounces at 5 calls between warnings, with severity escalation bypassing debounce.
 
+A third, independent signal tracks REAL transcript context against a fixed ABSOLUTE token threshold (default 100000), because the two signals above scale with the model's context window and fire far too late on 1M-context models. `hooks/context-monitor.sh` reports crossings of that absolute threshold (once per 25k-token band) alongside its existing heuristic bands. A Stop hook, `hooks/coordinator-handoff.sh`, uses the same absolute threshold and the same measurement function to decide whether a bb coordinator/worker thread needs a handoff nudge — blocking for coordinators, advisory for workers.
+
 **Plugin Type:** Claude Code skill + hook plugin
 **Current Version:** 0.1.2
 
