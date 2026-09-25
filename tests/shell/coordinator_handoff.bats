@@ -467,6 +467,7 @@ EOF
 printf 'claude-code claude-sonnet-5\n'
 EOF
     chmod +x "$newer/scripts/coordinator-model.sh"
+    touch "$newer"   # unambiguously the most recently modified match
 
     make_bb_stub '{"marking":{},"rotationEnabled":false}'
     run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-fakeroot-cache")"
