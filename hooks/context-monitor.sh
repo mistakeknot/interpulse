@@ -274,7 +274,9 @@ case "$LEVEL" in
     } > "$CHECKPOINT"
     _ipm_ctx_detail=""
     [[ -n "${CONTEXT_USABLE:-}" ]] && _ipm_ctx_detail=", context: ${CONTEXT_USABLE}% usable remaining"
-    jq -n --arg msg "Context is near exhaustion (pressure: $PRESSURE, ~${EST_TOKENS} tokens${_ipm_ctx_detail}). Checkpoint written to $CHECKPOINT. Commit your work and wrap up NOW." \
+    _ipm_abs_suffix=""
+    [[ -n "$ABS_NOTE" ]] && _ipm_abs_suffix=" ${ABS_NOTE}"
+    jq -n --arg msg "Context is near exhaustion (pressure: $PRESSURE, ~${EST_TOKENS} tokens${_ipm_ctx_detail}). Checkpoint written to $CHECKPOINT. Commit your work and wrap up NOW.${_ipm_abs_suffix}" \
       '{"additionalContext": $msg}'
     ;;
   orange)
