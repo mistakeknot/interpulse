@@ -43,14 +43,32 @@
 #                                    in Clavain; this hook calls it as an
 #                                    external command and never reimplements
 #                                    its `ic route dispatch --role=coordination`
-#                                    resolution logic. If the command can't be
-#                                    found or fails, this hook falls back to
-#                                    the same hardcoded pair
-#                                    coordinator-model.sh itself would print
-#                                    on failure ("claude-code claude-sonnet-5")
-#                                    -- see resolve_coordinator_model() below.
-#                                    An Opus-class result is never honored
-#                                    for this role, from either path.
+#                                    resolution logic. On a real install,
+#                                    "coordinator-model.sh" is usually NOT on
+#                                    PATH (Clavain ships it under
+#                                    scripts/, not bin/), so when this
+#                                    variable is unset and the plain name
+#                                    does not resolve via `command -v`, this
+#                                    hook falls back to locating Clavain's
+#                                    installed plugin root the same way
+#                                    Clavain's own hooks/release-canary-check.sh
+#                                    does (installed_plugins.json's
+#                                    "clavain@<marketplace>" installPath),
+#                                    then interline's scripts/statusline.sh
+#                                    glob over the plugin cache
+#                                    (~/.claude/plugins/cache/*/clavain/*,
+#                                    most recently modified) if that lookup
+#                                    comes up empty -- see
+#                                    find_clavain_coordinator_model() below.
+#                                    If neither locates a usable script, or
+#                                    the resolver can't be found or fails,
+#                                    this hook falls back to the same
+#                                    hardcoded pair coordinator-model.sh
+#                                    itself would print on failure
+#                                    ("claude-code claude-sonnet-5") -- see
+#                                    resolve_coordinator_model() below. An
+#                                    Opus-class result is never honored for
+#                                    this role, from any path.
 #
 # STATE PERSISTENCE (fail-open-state-drift hardening):
 #
