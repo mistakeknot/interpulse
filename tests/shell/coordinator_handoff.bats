@@ -31,6 +31,12 @@ setup() {
     unset INTERPULSE_COORD_HOOK
     unset INTERPULSE_COORD_CONTEXT_TOKENS
     unset CLAVAIN_COORDINATOR_MODEL_CMD
+    # Keep find_clavain_coordinator_model()'s fallback lookup hermetic: point
+    # it at locations that do not exist rather than this host's real
+    # ~/.claude/plugins files, so these tests never depend on what happens to
+    # be installed on the machine running them.
+    export CLAVAIN_INSTALLED_FILE="$STATE_DIR/no-such-installed_plugins.json"
+    export CLAUDE_PLUGIN_CACHE_ROOT="$STATE_DIR/no-such-cache"
 
     # coordinator-model.sh stub: resolves to Sonnet, matching the real
     # external script's stdout contract ("<bb-provider> <model>").
@@ -409,6 +415,68 @@ EOF
     [ "$decision" = "block" ]
     [[ "$reason" == *"claude-sonnet-5"* ]]
     [[ "$reason" != *"opus"* ]]
+}
+
+@test "coordinator-handoff: resolver not on PATH is found via a fake installed_plugins.json Clavain root" {
+    rm -f "$STUB_DIR/coordinator-model.sh"
+
+    local fake_root="$STATE_DIR/fake-cache/interagency-marketplace/clavain/0.6.999"
+    mkdir -p "$fake_root/scripts" "$fake_root/.claude-plugin"
+    cat > "$fake_root/scripts/coordinator-model.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'claude-code claude-sonnet-5\n'
+EOF
+    chmod +x "$fake_root/scripts/coordinator-model.sh"
+    printf '{"name":"clavain","version":"0.6.999"}\n' > "$fake_root/.claude-plugin/plugin.json"
+
+    cat > "$CLAVAIN_INSTALLED_FILE" <<EOF
+{
+  "version": 2,
+  "plugins": {
+    "clavain@interagency-marketplace": [
+      {"scope": "user", "installPath": "$fake_root", "version": "0.6.999"}
+    ]
+  }
+}
+EOF
+
+    make_bb_stub '{"marking":{},"rotationEnabled":false}'
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-fakeroot-installed")"
+    [ "$status" -eq 0 ]
+    [ -n "$output" ]
+    decision="$(jq -r '.decision' <<<"$output")"
+    reason="$(jq -r '.reason' <<<"$output")"
+    [ "$decision" = "block" ]
+    [[ "$reason" == *"claude-sonnet-5"* ]]
+}
+
+@test "coordinator-handoff: resolver not on PATH falls back to a plugin-cache glob when installed_plugins.json has no clavain entry" {
+    rm -f "$STUB_DIR/coordinator-model.sh"
+    # No CLAVAIN_INSTALLED_FILE at all -- lookup #1 must come up empty and
+    # fall through to the cache glob, not error out.
+    rm -f "$CLAVAIN_INSTALLED_FILE"
+
+    local older="$CLAUDE_PLUGIN_CACHE_ROOT/interagency-marketplace/clavain/0.6.1"
+    local newer="$CLAUDE_PLUGIN_CACHE_ROOT/interagency-marketplace/clavain/0.6.999"
+    mkdir -p "$older/scripts" "$newer/scripts"
+    printf '#!/usr/bin/env bash\nprintf "claude-code claude-opus-5-5\\n"\n' > "$older/scripts/coordinator-model.sh"
+    chmod +x "$older/scripts/coordinator-model.sh"
+    touch -d '1 hour ago' "$older" 2>/dev/null || true
+    cat > "$newer/scripts/coordinator-model.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'claude-code claude-sonnet-5\n'
+EOF
+    chmod +x "$newer/scripts/coordinator-model.sh"
+    touch "$newer"   # unambiguously the most recently modified match
+
+    make_bb_stub '{"marking":{},"rotationEnabled":false}'
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-fakeroot-cache")"
+    [ "$status" -eq 0 ]
+    [ -n "$output" ]
+    decision="$(jq -r '.decision' <<<"$output")"
+    reason="$(jq -r '.reason' <<<"$output")"
+    [ "$decision" = "block" ]
+    [[ "$reason" == *"claude-sonnet-5"* ]]
 }
 
 @test "coordinator-handoff: model resolver returning Opus is never honored" {
