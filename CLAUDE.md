@@ -31,3 +31,7 @@ Level = max(pressure_level, context_level) — either metric can trigger warning
 **Context thresholds (ground truth, normalized for 16.5% autocompact buffer):**
 - Green: usable > 35%, Yellow: usable <= 35%, Orange: usable <= 20%, Red: usable <= 10%
 - Falls back to pressure-only when `context_window` is absent (subagents, older Claude Code)
+
+## Absolute Real-Context Threshold
+
+Both signals above scale with the model's context window, so they fire far too late on 1M-context models (100k real tokens is only ~10% used there). `_ip_transcript_tokens` (in `lib/interpulse-lib.sh`) measures the real transcript context the same way for both hooks — the last main-chain assistant record's `input_tokens + cache_creation_input_tokens + cache_read_input_tokens` — and both hooks compare that to the same fixed absolute threshold, `INTERPULSE_COORD_CONTEXT_TOKENS` (default 100000), banded every 25k tokens (100k, 125k, 150k, …). `context-monitor.sh` reports it (never blocks); `coordinator-handoff.sh` decides coordinator-block vs. worker-advisory from it.
