@@ -158,7 +158,8 @@ Both registered in `hooks/hooks.json` (separate from plugin.json).
 ## Testing
 
 ```bash
-cd tests && uv run pytest -q
+cd tests && uv run pytest -q     # structural tests
+bats tests/shell/*.bats          # hook behavior tests (coordinator-handoff, context-monitor abs extension)
 ```
 
 ## Known Constraints
