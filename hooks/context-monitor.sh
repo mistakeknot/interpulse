@@ -301,13 +301,27 @@ case "$LEVEL" in
     fi
     _ipm_ctx_detail=""
     [[ -n "${CONTEXT_USABLE:-}" ]] && _ipm_ctx_detail=", context: ${CONTEXT_USABLE}% usable remaining"
-    jq -n --arg msg "Context pressure is high (pressure: $PRESSURE, ~${EST_TOKENS} tokens${_ipm_ctx_detail}). Finish current work and commit. Avoid launching new subagents.${_ipm_checkpoint_msg}" \
+    _ipm_abs_suffix=""
+    [[ -n "$ABS_NOTE" ]] && _ipm_abs_suffix=" ${ABS_NOTE}"
+    jq -n --arg msg "Context pressure is high (pressure: $PRESSURE, ~${EST_TOKENS} tokens${_ipm_ctx_detail}). Finish current work and commit. Avoid launching new subagents.${_ipm_checkpoint_msg}${_ipm_abs_suffix}" \
       '{"additionalContext": $msg}'
     ;;
   yellow)
     _ipm_ctx_detail=""
     [[ -n "${CONTEXT_USABLE:-}" ]] && _ipm_ctx_detail=", context: ${CONTEXT_USABLE}% usable remaining"
-    jq -n --arg msg "Context pressure is moderate (pressure: $PRESSURE, ~${EST_TOKENS} tokens${_ipm_ctx_detail}). Consider wrapping up current task before starting new ones." \
+    _ipm_abs_suffix=""
+    [[ -n "$ABS_NOTE" ]] && _ipm_abs_suffix=" ${ABS_NOTE}"
+    jq -n --arg msg "Context pressure is moderate (pressure: $PRESSURE, ~${EST_TOKENS} tokens${_ipm_ctx_detail}). Consider wrapping up current task before starting new ones.${_ipm_abs_suffix}" \
       '{"additionalContext": $msg}'
     ;;
 esac
+
+# Heuristic level is green (or was suppressed by debounce), but the real
+# transcript context has crossed the absolute handoff threshold in a NEW
+# band this call -- report it on its own rather than staying silent just
+# because the percentage-based signal hasn't caught up yet (the whole point
+# of tracking this separately: it fires on a 1M-context session where the
+# percentage signal may never fire at all).
+if [[ -z "$LEVEL" && -n "$ABS_NOTE" ]]; then
+  jq -n --arg msg "$ABS_NOTE" '{"additionalContext": $msg}'
+fi
