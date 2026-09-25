@@ -47,6 +47,33 @@ SID=$(_ip_session_id "$INPUT")
 TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
 OUTPUT_LEN=$(echo "$INPUT" | jq -r '.tool_output // "" | length' 2>/dev/null || echo 0)
 
+# --- Absolute real-context measure (same function, same threshold, as the
+#     Stop hook) ---
+TRANSCRIPT_PATH=$(_ip_transcript_path "$INPUT")
+REAL_RESULT="$(_ip_transcript_tokens "$TRANSCRIPT_PATH")"
+REAL_TOKENS="${REAL_RESULT%% *}"
+REAL_MODEL="${REAL_RESULT#* }"
+[[ "$REAL_TOKENS" =~ ^[0-9]+$ ]] || REAL_TOKENS=0
+ABS_THRESHOLD="${INTERPULSE_COORD_CONTEXT_TOKENS:-100000}"
+[[ "$ABS_THRESHOLD" =~ ^[0-9]+$ ]] || ABS_THRESHOLD=100000
+ABS_BAND="$(_ip_absolute_band "$REAL_TOKENS" "$ABS_THRESHOLD")"
+ABS_CROSSED=false
+[[ -n "$ABS_BAND" ]] && ABS_CROSSED=true
+
+# Report at most once per 25k-token band past the threshold, same as the
+# Stop hook's band throttle, so this doesn't re-warn on every single tool
+# call once past 100k.
+ABS_NOTE=""
+if [[ "$ABS_CROSSED" == true ]]; then
+  ABS_BAND_FILE="/tmp/interpulse-absband-${SID}"
+  PREV_ABS_BAND=""
+  [[ -f "$ABS_BAND_FILE" ]] && PREV_ABS_BAND="$(cat "$ABS_BAND_FILE" 2>/dev/null)"
+  if [[ "$PREV_ABS_BAND" != "$ABS_BAND" ]]; then
+    printf '%s' "$ABS_BAND" > "$ABS_BAND_FILE" 2>/dev/null || true
+    ABS_NOTE="Real transcript context is ~${REAL_TOKENS} tokens, past the absolute handoff threshold of ${ABS_THRESHOLD} (independent of context-window percentage). Coordinator threads: run bb handoff --self --to <provider> --model <model> --replace, or bb handoff coordinator enable --self --rotate-at ${ABS_THRESHOLD}."
+  fi
+fi
+
 SF=$(_ip_state_file "$SID")
 STATE=$(_ip_read_state "$SF")
 
