@@ -10,6 +10,8 @@ At Red, it auto-checkpoints context by writing a session summary, so you can rec
 
 The pressure model is deliberately conservative: it's better to warn early and be wrong than to warn late and lose context.
 
+interpulse also tracks REAL transcript context against a fixed absolute token threshold (default 100000), independent of the percentage-based signal above — a large context window can otherwise hide a genuinely large burn behind a low percentage. For bb-orchestrated sessions, a Stop hook uses that same absolute threshold to nudge coordinator threads to hand off (blocking) and worker threads to consider one (advisory).
+
 ## Installation
 
 First, add the [interagency marketplace](https://github.com/mistakeknot/interagency-marketplace) (one-time setup):
@@ -61,8 +63,9 @@ Warnings appear automatically as hooks fire — no manual checking needed for th
 
 ```
 hooks/
-  hooks.json              PostToolUse hook registration
-  context-monitor.sh      Pressure tracker — scores, warns, checkpoints
+  hooks.json              PostToolUse + Stop hook registration
+  context-monitor.sh      Pressure tracker — scores, warns, checkpoints; also reports absolute real-context crossings
+  coordinator-handoff.sh  Stop hook — bb coordinator/worker handoff nudge at the absolute token threshold
 lib/
   interpulse-lib.sh       Shared functions
 skills/

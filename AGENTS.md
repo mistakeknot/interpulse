@@ -13,7 +13,7 @@
 | Repo | `https://github.com/mistakeknot/interpulse` |
 | Namespace | `interpulse:` |
 | Manifest | `.claude-plugin/plugin.json` |
-| Components | 1 skill, 0 commands, 0 agents, 1 hook (PostToolUse), 2 scripts |
+| Components | 1 skill, 0 commands, 0 agents, 2 hooks (PostToolUse, Stop), 2 scripts |
 | License | MIT |
 
 ### Release workflow
@@ -29,6 +29,8 @@ scripts/bump-version.sh <version>   # bump, commit, push, publish
 
 **Solution:** PostToolUse hook uses dual-threshold logic: `level = max(pressure_level, context_level)`. Pressure tracks tool call weight with time decay. Context reads Claude Code's `context_window.remaining_percentage` and normalizes for the 16.5% autocompact buffer. Either metric can trigger warnings. Debounces at 5 calls between warnings, with severity escalation bypassing debounce.
 
+A third, independent signal tracks REAL transcript context against a fixed ABSOLUTE token threshold (default 100000), because the two signals above scale with the model's context window and fire far too late on 1M-context models. `hooks/context-monitor.sh` reports crossings of that absolute threshold (once per 25k-token band) alongside its existing heuristic bands. A Stop hook, `hooks/coordinator-handoff.sh`, uses the same absolute threshold and the same measurement function to decide whether a bb coordinator/worker thread needs a handoff nudge — blocking for coordinators, advisory for workers.
+
 **Plugin Type:** Claude Code skill + hook plugin
 **Current Version:** 0.1.2
 
@@ -41,16 +43,19 @@ interpulse/
 ├── skills/
 │   └── status/SKILL.md           # Pressure dashboard
 ├── hooks/
-│   ├── hooks.json                # PostToolUse registration
-│   └── context-monitor.sh        # Pressure tracker with warn/checkpoint logic
+│   ├── hooks.json                # PostToolUse + Stop registration
+│   ├── context-monitor.sh        # Pressure tracker with warn/checkpoint logic + absolute real-context reporting
+│   └── coordinator-handoff.sh    # Stop hook: bb coordinator/worker handoff nudge at an absolute token threshold
 ├── lib/
-│   └── interpulse-lib.sh         # Shared state management (_ip_session_id, _ip_state_file, etc.)
+│   └── interpulse-lib.sh         # Shared state management + transcript token measurement
 ├── scripts/
 │   ├── bump-version.sh
 │   └── validate-gitleaks-waivers.sh
 ├── tests/
 │   ├── pyproject.toml
-│   └── structural/
+│   ├── structural/
+│   ├── shell/                    # bats tests for the hooks (coordinator-handoff, context-monitor abs extension)
+│   └── fixtures/coordinator-handoff/
 ├── CLAUDE.md
 ├── AGENTS.md                     # This file
 ├── PHILOSOPHY.md
@@ -95,6 +100,15 @@ Reads `context_window.remaining_percentage` from PostToolUse stdin JSON and norm
 - Severity escalation (e.g., yellow→orange, orange→red) bypasses debounce and fires immediately
 - Debounce state stored at `/tmp/interpulse-debounce-${SESSION_ID}.json`
 
+### Absolute Real-Context Threshold (independent of the two signals above)
+
+`hooks/context-monitor.sh` (PostToolUse) and `hooks/coordinator-handoff.sh` (Stop) both measure the REAL transcript context via `lib/interpulse-lib.sh`'s `_ip_transcript_tokens` — the last main-chain assistant record's `input_tokens + cache_creation_input_tokens + cache_read_input_tokens` — and compare it against a fixed **absolute** token count (`INTERPULSE_COORD_CONTEXT_TOKENS`, default 100000), never a percentage of the window. This is deliberate: on a 1M-token model, 150k real tokens is only ~15% used and never trips the percentage-based bands above.
+
+- `context-monitor.sh` reports a crossing once per 25k-token band as `additionalContext`, independent of (and in addition to) its heuristic pressure/context-window level — it can fire while the heuristic level is still green.
+- `coordinator-handoff.sh` (Stop) makes this a `{"decision":"block", ...}` for a bb **coordinator** thread (marked via `bb handoff coordinator status --self --json`, or has non-archived children), and an advisory `systemMessage` for a **worker** thread. Blocking re-fires once per 25k-token band past the threshold (100k, 125k, 150k, …), not on every Stop.
+- The coordinator model name in the directive comes from Clavain's `scripts/coordinator-model.sh`, called as an external command (never reimplemented here) via `CLAVAIN_COORDINATOR_MODEL_CMD` (default `coordinator-model.sh`, resolved on `PATH`). If that command is missing or fails, this hook falls back to the hardcoded pair `claude-code claude-sonnet-5` and never emits an Opus-class model for this role.
+- State (the per-session band file) is written only after a full determination completes for that Stop — never before or during a bb lookup that outcome depends on — so a transient bb failure never freezes a band as "checked" for the rest of its 25k tokens. See the header comment in `hooks/coordinator-handoff.sh` for the full rationale.
+
 ## Session State
 
 Ephemeral file at `/tmp/interpulse-${SESSION_ID}.json`:
@@ -122,11 +136,17 @@ Written to `~/.interband/interpulse/pressure/${SESSION_ID}.json` for statusline 
 - `_ip_normalize_usable_context` — normalize raw % to usable % (accounting for 16.5% buffer)
 - `_ip_context_level` — map usable remaining % to severity level
 - `_ip_max_level` — return the higher severity of two levels
+- `_ip_transcript_path` — extract `transcript_path` from hook stdin JSON
+- `_ip_transcript_tokens` — real transcript context tokens + model, from a bounded tail read; shared by both hooks so they always agree on the same absolute number
+- `_ip_absolute_band` — 25k-token band index above a fixed threshold (empty when below it)
 
-Guards against double-loading. Sourced by both the hook and skill scripts.
+Guards against double-loading. Sourced by both hooks and skill scripts.
 
-### Hook
-`hooks/context-monitor.sh` — PostToolUse hook, fires on `Edit|Write|Bash|Task|NotebookEdit|MultiEdit`. Timeout: 5s. Registered in `hooks/hooks.json` (separate from plugin.json).
+### Hooks
+- `hooks/context-monitor.sh` — PostToolUse hook, fires on `Edit|Write|Bash|Task|NotebookEdit|MultiEdit`. Timeout: 5s.
+- `hooks/coordinator-handoff.sh` — Stop hook. Timeout: 5s.
+
+Both registered in `hooks/hooks.json` (separate from plugin.json).
 
 ## Integration Points
 
@@ -138,7 +158,8 @@ Guards against double-loading. Sourced by both the hook and skill scripts.
 ## Testing
 
 ```bash
-cd tests && uv run pytest -q
+cd tests && uv run pytest -q     # structural tests
+bats tests/shell/*.bats          # hook behavior tests (coordinator-handoff, context-monitor abs extension)
 ```
 
 ## Known Constraints

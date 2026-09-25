@@ -16,6 +16,24 @@
 #     Red    : usable <= 10%
 #
 # Debounce: 5 tool calls between warnings. Severity escalation bypasses debounce.
+#
+# ABSOLUTE real-context tracking (added alongside the two heuristic signals
+# above, neither of which it replaces): both percentage-based thresholds
+# scale with the model's context WINDOW SIZE, so on a 1M-token model a
+# genuinely large coordinator burn (e.g. 150k real tokens) is still only
+# ~15% used and never reaches even Yellow. hooks/coordinator-handoff.sh (the
+# Stop hook) makes its blocking/advisory decision on a fixed ABSOLUTE token
+# count instead (default 100000, see INTERPULSE_COORD_CONTEXT_TOKENS). This
+# monitor now ALSO measures that same absolute number from the transcript
+# (via lib/interpulse-lib.sh's _ip_transcript_tokens, the identical function
+# the Stop hook uses, so both mechanisms agree on the same figure) and
+# reports it once per 25k-token band past the threshold -- as an
+# additionalContext note, same as the existing heuristic warnings, never a
+# block (PostToolUse has no coordinator/worker distinction to make; that
+# decision belongs to the Stop hook). Reported independently of the
+# pressure/context bands above: a session can be RED on tokens 1 & 2 while
+# still green here (small window, low absolute count) or green above while
+# past the absolute threshold here (huge window, six-figure real count).
 set -uo pipefail
 trap 'exit 0' ERR
 
@@ -28,6 +46,33 @@ SID=$(_ip_session_id "$INPUT")
 
 TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
 OUTPUT_LEN=$(echo "$INPUT" | jq -r '.tool_output // "" | length' 2>/dev/null || echo 0)
+
+# --- Absolute real-context measure (same function, same threshold, as the
+#     Stop hook) ---
+TRANSCRIPT_PATH=$(_ip_transcript_path "$INPUT")
+REAL_RESULT="$(_ip_transcript_tokens "$TRANSCRIPT_PATH")"
+REAL_TOKENS="${REAL_RESULT%% *}"
+REAL_MODEL="${REAL_RESULT#* }"
+[[ "$REAL_TOKENS" =~ ^[0-9]+$ ]] || REAL_TOKENS=0
+ABS_THRESHOLD="${INTERPULSE_COORD_CONTEXT_TOKENS:-100000}"
+[[ "$ABS_THRESHOLD" =~ ^[0-9]+$ ]] || ABS_THRESHOLD=100000
+ABS_BAND="$(_ip_absolute_band "$REAL_TOKENS" "$ABS_THRESHOLD")"
+ABS_CROSSED=false
+[[ -n "$ABS_BAND" ]] && ABS_CROSSED=true
+
+# Report at most once per 25k-token band past the threshold, same as the
+# Stop hook's band throttle, so this doesn't re-warn on every single tool
+# call once past 100k.
+ABS_NOTE=""
+if [[ "$ABS_CROSSED" == true ]]; then
+  ABS_BAND_FILE="/tmp/interpulse-absband-${SID}"
+  PREV_ABS_BAND=""
+  [[ -f "$ABS_BAND_FILE" ]] && PREV_ABS_BAND="$(cat "$ABS_BAND_FILE" 2>/dev/null)"
+  if [[ "$PREV_ABS_BAND" != "$ABS_BAND" ]]; then
+    printf '%s' "$ABS_BAND" > "$ABS_BAND_FILE" 2>/dev/null || true
+    ABS_NOTE="Real transcript context is ~${REAL_TOKENS} tokens, past the absolute handoff threshold of ${ABS_THRESHOLD} (independent of context-window percentage). Coordinator threads: run bb handoff --self --to <provider> --model <model> --replace, or bb handoff coordinator enable --self --rotate-at ${ABS_THRESHOLD}."
+  fi
+fi
 
 SF=$(_ip_state_file "$SID")
 STATE=$(_ip_read_state "$SF")
@@ -203,8 +248,11 @@ if [[ -n "$_ipm_ib_lib" ]]; then
     --argjson pressure "$PRESSURE" \
     --argjson est_tokens "$EST_TOKENS" \
     --argjson ts "$NOW" \
+    --argjson real_context_tokens "$REAL_TOKENS" \
+    --argjson real_context_threshold "$ABS_THRESHOLD" \
+    --argjson real_context_threshold_crossed "$([[ "$ABS_CROSSED" == true ]] && echo true || echo false)" \
     "${_ipm_ib_ctx_args[@]}" \
-    '{level:$level, pressure:$pressure, est_tokens:$est_tokens, ts:$ts} + (if $ARGS.named | has("context_usable") then {context_usable:$ARGS.named.context_usable} else {} end) + (if $ARGS.named | has("context_raw") then {context_raw:$ARGS.named.context_raw} else {} end)')
+    '{level:$level, pressure:$pressure, est_tokens:$est_tokens, ts:$ts, real_context_tokens:$real_context_tokens, real_context_threshold:$real_context_threshold, real_context_threshold_crossed:$real_context_threshold_crossed} + (if $ARGS.named | has("context_usable") then {context_usable:$ARGS.named.context_usable} else {} end) + (if $ARGS.named | has("context_raw") then {context_raw:$ARGS.named.context_raw} else {} end)')
   _ipm_ib_file=$(interband_path "interpulse" "pressure" "$SID" 2>/dev/null) || _ipm_ib_file=""
   if [[ -n "$_ipm_ib_file" ]]; then
     interband_write "$_ipm_ib_file" "interpulse" "context_pressure" "$SID" "$_ipm_ib_payload" 2>/dev/null || true
@@ -226,7 +274,9 @@ case "$LEVEL" in
     } > "$CHECKPOINT"
     _ipm_ctx_detail=""
     [[ -n "${CONTEXT_USABLE:-}" ]] && _ipm_ctx_detail=", context: ${CONTEXT_USABLE}% usable remaining"
-    jq -n --arg msg "Context is near exhaustion (pressure: $PRESSURE, ~${EST_TOKENS} tokens${_ipm_ctx_detail}). Checkpoint written to $CHECKPOINT. Commit your work and wrap up NOW." \
+    _ipm_abs_suffix=""
+    [[ -n "$ABS_NOTE" ]] && _ipm_abs_suffix=" ${ABS_NOTE}"
+    jq -n --arg msg "Context is near exhaustion (pressure: $PRESSURE, ~${EST_TOKENS} tokens${_ipm_ctx_detail}). Checkpoint written to $CHECKPOINT. Commit your work and wrap up NOW.${_ipm_abs_suffix}" \
       '{"additionalContext": $msg}'
     ;;
   orange)
@@ -251,13 +301,27 @@ case "$LEVEL" in
     fi
     _ipm_ctx_detail=""
     [[ -n "${CONTEXT_USABLE:-}" ]] && _ipm_ctx_detail=", context: ${CONTEXT_USABLE}% usable remaining"
-    jq -n --arg msg "Context pressure is high (pressure: $PRESSURE, ~${EST_TOKENS} tokens${_ipm_ctx_detail}). Finish current work and commit. Avoid launching new subagents.${_ipm_checkpoint_msg}" \
+    _ipm_abs_suffix=""
+    [[ -n "$ABS_NOTE" ]] && _ipm_abs_suffix=" ${ABS_NOTE}"
+    jq -n --arg msg "Context pressure is high (pressure: $PRESSURE, ~${EST_TOKENS} tokens${_ipm_ctx_detail}). Finish current work and commit. Avoid launching new subagents.${_ipm_checkpoint_msg}${_ipm_abs_suffix}" \
       '{"additionalContext": $msg}'
     ;;
   yellow)
     _ipm_ctx_detail=""
     [[ -n "${CONTEXT_USABLE:-}" ]] && _ipm_ctx_detail=", context: ${CONTEXT_USABLE}% usable remaining"
-    jq -n --arg msg "Context pressure is moderate (pressure: $PRESSURE, ~${EST_TOKENS} tokens${_ipm_ctx_detail}). Consider wrapping up current task before starting new ones." \
+    _ipm_abs_suffix=""
+    [[ -n "$ABS_NOTE" ]] && _ipm_abs_suffix=" ${ABS_NOTE}"
+    jq -n --arg msg "Context pressure is moderate (pressure: $PRESSURE, ~${EST_TOKENS} tokens${_ipm_ctx_detail}). Consider wrapping up current task before starting new ones.${_ipm_abs_suffix}" \
       '{"additionalContext": $msg}'
     ;;
 esac
+
+# Heuristic level is green (or was suppressed by debounce), but the real
+# transcript context has crossed the absolute handoff threshold in a NEW
+# band this call -- report it on its own rather than staying silent just
+# because the percentage-based signal hasn't caught up yet (the whole point
+# of tracking this separately: it fires on a 1M-context session where the
+# percentage signal may never fire at all).
+if [[ -z "$LEVEL" && -n "$ABS_NOTE" ]]; then
+  jq -n --arg msg "$ABS_NOTE" '{"additionalContext": $msg}'
+fi
