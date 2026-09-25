@@ -31,6 +31,12 @@ setup() {
     unset INTERPULSE_COORD_HOOK
     unset INTERPULSE_COORD_CONTEXT_TOKENS
     unset CLAVAIN_COORDINATOR_MODEL_CMD
+    # Keep find_clavain_coordinator_model()'s fallback lookup hermetic: point
+    # it at locations that do not exist rather than this host's real
+    # ~/.claude/plugins files, so these tests never depend on what happens to
+    # be installed on the machine running them.
+    export CLAVAIN_INSTALLED_FILE="$STATE_DIR/no-such-installed_plugins.json"
+    export CLAUDE_PLUGIN_CACHE_ROOT="$STATE_DIR/no-such-cache"
 
     # coordinator-model.sh stub: resolves to Sonnet, matching the real
     # external script's stdout contract ("<bb-provider> <model>").
