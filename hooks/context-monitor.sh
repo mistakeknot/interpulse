@@ -248,8 +248,11 @@ if [[ -n "$_ipm_ib_lib" ]]; then
     --argjson pressure "$PRESSURE" \
     --argjson est_tokens "$EST_TOKENS" \
     --argjson ts "$NOW" \
+    --argjson real_context_tokens "$REAL_TOKENS" \
+    --argjson real_context_threshold "$ABS_THRESHOLD" \
+    --argjson real_context_threshold_crossed "$([[ "$ABS_CROSSED" == true ]] && echo true || echo false)" \
     "${_ipm_ib_ctx_args[@]}" \
-    '{level:$level, pressure:$pressure, est_tokens:$est_tokens, ts:$ts} + (if $ARGS.named | has("context_usable") then {context_usable:$ARGS.named.context_usable} else {} end) + (if $ARGS.named | has("context_raw") then {context_raw:$ARGS.named.context_raw} else {} end)')
+    '{level:$level, pressure:$pressure, est_tokens:$est_tokens, ts:$ts, real_context_tokens:$real_context_tokens, real_context_threshold:$real_context_threshold, real_context_threshold_crossed:$real_context_threshold_crossed} + (if $ARGS.named | has("context_usable") then {context_usable:$ARGS.named.context_usable} else {} end) + (if $ARGS.named | has("context_raw") then {context_raw:$ARGS.named.context_raw} else {} end)')
   _ipm_ib_file=$(interband_path "interpulse" "pressure" "$SID" 2>/dev/null) || _ipm_ib_file=""
   if [[ -n "$_ipm_ib_file" ]]; then
     interband_write "$_ipm_ib_file" "interpulse" "context_pressure" "$SID" "$_ipm_ib_payload" 2>/dev/null || true
