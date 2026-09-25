@@ -6,6 +6,9 @@
 #   _ip_state_file     — path to session state file
 #   _ip_read_state     — read state JSON (or default)
 #   _ip_write_state    — write state JSON
+#   _ip_transcript_path   — extract transcript_path from stdin JSON
+#   _ip_transcript_tokens — real transcript context tokens + model (bounded tail read)
+#   _ip_absolute_band     — band index for a real-token count above a threshold
 
 [[ -n "${_LIB_INTERPULSE_LOADED:-}" ]] && return 0
 _LIB_INTERPULSE_LOADED=1
