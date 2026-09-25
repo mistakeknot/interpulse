@@ -100,8 +100,10 @@ hook_input_big_output() {  # $1 = transcript path, $2 = tool_output file
     # A single huge tool_output (chars/4 estimate) pushes est_tokens over
     # 200000 in one call, triggering the pre-existing RED heuristic path
     # (checkpoint file + additionalContext), independent of any transcript.
-    big_output="$(head -c 900000 /dev/zero | tr '\0' 'a')"
-    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" "$big_output")"
+    big_output_file="$(mktemp)"
+    head -c 900000 /dev/zero | tr '\0' 'a' > "$big_output_file"
+    run bash "$HOOK" <<< "$(hook_input_big_output "$FIXTURES/130k-opus.jsonl" "$big_output_file")"
+    rm -f "$big_output_file"
     [ "$status" -eq 0 ]
     [ -n "$output" ]
     msg="$(jq -r '.additionalContext' <<<"$output")"
