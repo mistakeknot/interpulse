@@ -63,8 +63,9 @@ Warnings appear automatically as hooks fire — no manual checking needed for th
 
 ```
 hooks/
-  hooks.json              PostToolUse hook registration
-  context-monitor.sh      Pressure tracker — scores, warns, checkpoints
+  hooks.json              PostToolUse + Stop hook registration
+  context-monitor.sh      Pressure tracker — scores, warns, checkpoints; also reports absolute real-context crossings
+  coordinator-handoff.sh  Stop hook — bb coordinator/worker handoff nudge at the absolute token threshold
 lib/
   interpulse-lib.sh       Shared functions
 skills/
