@@ -19,16 +19,25 @@ setup() {
     SID="cm-abs-$$-$RANDOM"
     unset INTERPULSE_COORD_CONTEXT_TOKENS
 
+    # Band-throttle state now lives under INTERPULSE_COORD_STATE_DIR (P2-3
+    # hardening: a predictable /tmp path is symlink-attackable on a shared
+    # host), the same directory hooks/coordinator-handoff.sh uses. Point it
+    # at a private per-test dir rather than the real default
+    # ~/.interpulse/coordinator-handoff.
+    STATE_DIR="$(mktemp -d)"
+    export INTERPULSE_COORD_STATE_DIR="$STATE_DIR"
+
     STATE_FILE="/tmp/interpulse-${SID}.json"
     DEBOUNCE_FILE="/tmp/interpulse-debounce-${SID}.json"
-    ABS_BAND_FILE="/tmp/interpulse-absband-${SID}"
+    ABS_BAND_FILE="$STATE_DIR/${SID}.absband"
     CHECKPOINT_FILE="/tmp/interpulse-checkpoint-${SID}.md"
     rm -f "$STATE_FILE" "$DEBOUNCE_FILE" "$ABS_BAND_FILE" "$CHECKPOINT_FILE"
 }
 
 teardown() {
-    rm -f "$STATE_FILE" "$DEBOUNCE_FILE" "$ABS_BAND_FILE" "$CHECKPOINT_FILE" \
+    rm -f "$STATE_FILE" "$DEBOUNCE_FILE" "$CHECKPOINT_FILE" \
         "/tmp/interpulse-intermem-checkpoint-${SID}"
+    rm -rf "$STATE_DIR"
 }
 
 hook_input() {  # $1 = transcript path (or empty), $2 = tool_output length filler
@@ -111,4 +120,44 @@ hook_input_big_output() {  # $1 = transcript path, $2 = tool_output file
     [[ "$msg" == *"Checkpoint written to"* ]]
     [[ "$msg" == *"130000"* ]]
     [ -f "$CHECKPOINT_FILE" ]
+}
+
+@test "context-monitor abs: dropping below threshold clears the band so climbing back reports again (P2-2)" {
+    # Mirrors the Stop hook's band-reentry fix: a stale band marker must not
+    # suppress a later re-crossing of the same band number after a /compact
+    # (or similar) drop below the absolute threshold.
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" "small")"
+    [ "$status" -eq 0 ]
+    [ -n "$output" ]
+    [ -f "$ABS_BAND_FILE" ]
+
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/60k.jsonl" "small")"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ ! -f "$ABS_BAND_FILE" ]
+
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" "small")"
+    [ "$status" -eq 0 ]
+    [ -n "$output" ]
+    msg="$(jq -r '.additionalContext' <<<"$output")"
+    [[ "$msg" == *"130000"* ]]
+}
+
+@test "context-monitor abs: an unreadable band file still reaches a determination (P2-3)" {
+    if [[ "$(id -u)" -eq 0 ]]; then
+        skip "running as root: chmod 000 does not block reads"
+    fi
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" "small")"
+    [ "$status" -eq 0 ]
+    [ -n "$output" ]
+    [ -f "$ABS_BAND_FILE" ]
+    chmod 000 "$ABS_BAND_FILE"
+
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/160k-sonnet.jsonl" "small")"
+    [ "$status" -eq 0 ]
+    [ -n "$output" ]
+    msg="$(jq -r '.additionalContext' <<<"$output")"
+    [[ "$msg" == *"160000"* ]]
+
+    chmod 600 "$ABS_BAND_FILE"
 }
