@@ -624,12 +624,22 @@ EOF
 # --- P2-4: total runtime must stay comfortably under the hooks.json timeout -
 
 @test "coordinator-handoff: slow bb/resolver calls still finish well under the hooks.json timeout" {
+    # Each external call sleeps just under the 1s per-call `timeout` cap
+    # (P2-4) -- long enough to give the total elapsed time real weight
+    # (unlike every other test's instant stubs), but short enough that
+    # `timeout 1` does NOT kill the call. A sleep at or above 1s here would
+    # exercise a different path entirely (the call gets killed -> that bb
+    # lookup fails -> the hook goes silent by design, per the "a bb timeout
+    # is silent" test above) rather than the runtime-budget path this test
+    # means to cover. This scenario forces all three external calls in one
+    # Stop: status (fractional rotateAt forces a context-window lookup) and
+    # the model resolver.
     cat > "$STUB_DIR/bb" <<EOF
 #!/usr/bin/env bash
 echo "\$*" >> "$STATE_DIR/bb-calls"
 if [[ "\$1 \$2 \$3" == "handoff coordinator status" ]]; then
-    sleep 3
-    printf '%s\n' '{"marking":{},"rotationEnabled":false}'
+    sleep 0.8
+    printf '%s\n' '{"marking":{"rotateAt":0.3},"rotationEnabled":true}'
     exit 0
 fi
 if [[ "\$1 \$2" == "thread list" ]]; then
@@ -637,7 +647,7 @@ if [[ "\$1 \$2" == "thread list" ]]; then
     exit 0
 fi
 if [[ "\$1 \$2" == "thread context" ]]; then
-    sleep 3
+    sleep 0.8
     printf '%s\n' '{"usage":{"modelContextWindow":200000}}'
     exit 0
 fi
@@ -646,7 +656,7 @@ EOF
     chmod +x "$STUB_DIR/bb"
     cat > "$STUB_DIR/coordinator-model.sh" <<'EOF'
 #!/usr/bin/env bash
-sleep 3
+sleep 0.8
 printf 'claude-code claude-sonnet-5\n'
 EOF
     chmod +x "$STUB_DIR/coordinator-model.sh"
