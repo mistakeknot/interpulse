@@ -430,7 +430,7 @@ EOF
     mkdir -p "$fake_root/scripts" "$fake_root/.claude-plugin"
     cat > "$fake_root/scripts/coordinator-model.sh" <<'EOF'
 #!/usr/bin/env bash
-printf 'claude-code claude-sonnet-5-lookupA\n'
+printf 'claude-code claude-sonnet-5-lookupa\n'
 EOF
     chmod +x "$fake_root/scripts/coordinator-model.sh"
     printf '{"name":"clavain","version":"0.6.999"}\n' > "$fake_root/.claude-plugin/plugin.json"
@@ -453,7 +453,7 @@ EOF
     decision="$(jq -r '.decision' <<<"$output")"
     reason="$(jq -r '.reason' <<<"$output")"
     [ "$decision" = "block" ]
-    [[ "$reason" == *"claude-sonnet-5-lookupA"* ]]
+    [[ "$reason" == *"claude-sonnet-5-lookupa"* ]]
 }
 
 @test "coordinator-handoff: resolver not on PATH falls back to a plugin-cache glob when installed_plugins.json has no clavain entry" {
@@ -465,13 +465,13 @@ EOF
     local older="$CLAUDE_PLUGIN_CACHE_ROOT/interagency-marketplace/clavain/0.6.1"
     local newer="$CLAUDE_PLUGIN_CACHE_ROOT/interagency-marketplace/clavain/0.6.999"
     mkdir -p "$older/scripts" "$older/.claude-plugin" "$newer/scripts" "$newer/.claude-plugin"
-    printf '#!/usr/bin/env bash\nprintf "claude-code claude-sonnet-5-lookupOLD\\n"\n' > "$older/scripts/coordinator-model.sh"
+    printf '#!/usr/bin/env bash\nprintf "claude-code claude-sonnet-5-lookupold\\n"\n' > "$older/scripts/coordinator-model.sh"
     chmod +x "$older/scripts/coordinator-model.sh"
     printf '{"name":"clavain","version":"0.6.1"}\n' > "$older/.claude-plugin/plugin.json"
     touch -d '1 hour ago' "$older" 2>/dev/null || true
     cat > "$newer/scripts/coordinator-model.sh" <<'EOF'
 #!/usr/bin/env bash
-printf 'claude-code claude-sonnet-5-lookupNEW\n'
+printf 'claude-code claude-sonnet-5-lookupnew\n'
 EOF
     chmod +x "$newer/scripts/coordinator-model.sh"
     printf '{"name":"clavain","version":"0.6.999"}\n' > "$newer/.claude-plugin/plugin.json"
@@ -484,8 +484,8 @@ EOF
     decision="$(jq -r '.decision' <<<"$output")"
     reason="$(jq -r '.reason' <<<"$output")"
     [ "$decision" = "block" ]
-    [[ "$reason" == *"claude-sonnet-5-lookupNEW"* ]]
-    [[ "$reason" != *"lookupOLD"* ]]
+    [[ "$reason" == *"claude-sonnet-5-lookupnew"* ]]
+    [[ "$reason" != *"lookupold"* ]]
 }
 
 @test "coordinator-handoff: model resolver returning Opus is never honored" {

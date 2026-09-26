@@ -302,7 +302,14 @@ fi
 
 _persist_band() {
     [[ "$STATE_WRITABLE" == true ]] || return 0
-    printf '%s' "$band" > "$BAND_FILE" 2>/dev/null || true
+    # Grouped so 2>/dev/null actually covers a failure to OPEN "$BAND_FILE"
+    # for writing (e.g. a foreign-owned/unreadable band file left over from
+    # a prior run): `cmd > "$f" 2>/dev/null` alone applies redirects
+    # left-to-right, so a failed `> "$f"` open prints its "Permission
+    # denied" straight to the real stderr before `2>/dev/null` ever takes
+    # effect. Wrapping in a group applies both redirects to the group as a
+    # unit first.
+    { printf '%s' "$band" > "$BAND_FILE"; } 2>/dev/null || true
 }
 
 # Provider must be a bb-recognized backend name; model must look like a

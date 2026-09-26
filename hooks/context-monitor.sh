@@ -91,7 +91,13 @@ if [[ "$ABS_CROSSED" == true ]]; then
       PREV_ABS_BAND="$(cat "$ABS_BAND_FILE" 2>/dev/null)" || PREV_ABS_BAND=""
     fi
     if [[ "$PREV_ABS_BAND" != "$ABS_BAND" ]]; then
-      printf '%s' "$ABS_BAND" > "$ABS_BAND_FILE" 2>/dev/null || true
+      # Grouped so 2>/dev/null actually covers a failure to OPEN
+      # "$ABS_BAND_FILE" for writing (e.g. a foreign-owned/unreadable band
+      # file left over from a prior run): `cmd > "$f" 2>/dev/null` alone
+      # applies redirects left-to-right, so a failed `> "$f"` open prints
+      # its "Permission denied" straight to the real stderr before
+      # `2>/dev/null` ever takes effect.
+      { printf '%s' "$ABS_BAND" > "$ABS_BAND_FILE"; } 2>/dev/null || true
       ABS_NOTE="Real transcript context is ~${REAL_TOKENS} tokens, past the absolute handoff threshold of ${ABS_THRESHOLD} (independent of context-window percentage). Coordinator threads: run bb handoff --self --to <provider> --model <model> --replace, or bb handoff coordinator enable --self --rotate-at ${ABS_THRESHOLD}."
     fi
   else
