@@ -52,7 +52,6 @@ OUTPUT_LEN=$(echo "$INPUT" | jq -r '.tool_output // "" | length' 2>/dev/null || 
 TRANSCRIPT_PATH=$(_ip_transcript_path "$INPUT")
 REAL_RESULT="$(_ip_transcript_tokens "$TRANSCRIPT_PATH")"
 REAL_TOKENS="${REAL_RESULT%% *}"
-REAL_MODEL="${REAL_RESULT#* }"
 [[ "$REAL_TOKENS" =~ ^[0-9]+$ ]] || REAL_TOKENS=0
 ABS_THRESHOLD="${INTERPULSE_COORD_CONTEXT_TOKENS:-100000}"
 [[ "$ABS_THRESHOLD" =~ ^[0-9]+$ ]] || ABS_THRESHOLD=100000
@@ -60,18 +59,49 @@ ABS_BAND="$(_ip_absolute_band "$REAL_TOKENS" "$ABS_THRESHOLD")"
 ABS_CROSSED=false
 [[ -n "$ABS_BAND" ]] && ABS_CROSSED=true
 
+# Band-throttle state dir: the same per-user directory the Stop hook uses
+# (INTERPULSE_COORD_STATE_DIR, default ~/.interpulse/coordinator-handoff),
+# NOT a predictable /tmp path (P3: a world-writable /tmp/interpulse-absband-
+# $SID path can be pre-created as a symlink by another user on a shared
+# host, redirecting this write). Created 0700; a symlink there is refused
+# rather than followed. If the dir can't be made usable, the band-throttle
+# optimization is skipped entirely for this call (ABS_BAND_FILE unset) --
+# mirroring the Stop hook's STATE_WRITABLE=false pattern -- rather than
+# falling back to /tmp, which would silently reintroduce the same issue.
+_ipm_state_dir="${INTERPULSE_COORD_STATE_DIR:-$HOME/.interpulse/coordinator-handoff}"
+ABS_BAND_FILE=""
+if [[ -L "$_ipm_state_dir" ]]; then
+  : # refuse a symlinked state dir; ABS_BAND_FILE stays unset
+elif mkdir -p -m 0700 "$_ipm_state_dir" 2>/dev/null; then
+  SAFE_ABS_SID="$(printf '%s' "$SID" | tr '/:' '__')"
+  ABS_BAND_FILE="$_ipm_state_dir/${SAFE_ABS_SID}.absband"
+fi
+
 # Report at most once per 25k-token band past the threshold, same as the
 # Stop hook's band throttle, so this doesn't re-warn on every single tool
 # call once past 100k.
 ABS_NOTE=""
 if [[ "$ABS_CROSSED" == true ]]; then
-  ABS_BAND_FILE="/tmp/interpulse-absband-${SID}"
-  PREV_ABS_BAND=""
-  [[ -f "$ABS_BAND_FILE" ]] && PREV_ABS_BAND="$(cat "$ABS_BAND_FILE" 2>/dev/null)"
-  if [[ "$PREV_ABS_BAND" != "$ABS_BAND" ]]; then
-    printf '%s' "$ABS_BAND" > "$ABS_BAND_FILE" 2>/dev/null || true
+  if [[ -n "$ABS_BAND_FILE" ]]; then
+    PREV_ABS_BAND=""
+    if [[ -f "$ABS_BAND_FILE" ]]; then
+      # P2-3: never let a failing `cat` (unreadable file) reach the
+      # script-wide ERR trap as the tail of an `&&` list -- that would
+      # silence this note permanently instead of just once.
+      PREV_ABS_BAND="$(cat "$ABS_BAND_FILE" 2>/dev/null)" || PREV_ABS_BAND=""
+    fi
+    if [[ "$PREV_ABS_BAND" != "$ABS_BAND" ]]; then
+      printf '%s' "$ABS_BAND" > "$ABS_BAND_FILE" 2>/dev/null || true
+      ABS_NOTE="Real transcript context is ~${REAL_TOKENS} tokens, past the absolute handoff threshold of ${ABS_THRESHOLD} (independent of context-window percentage). Coordinator threads: run bb handoff --self --to <provider> --model <model> --replace, or bb handoff coordinator enable --self --rotate-at ${ABS_THRESHOLD}."
+    fi
+  else
     ABS_NOTE="Real transcript context is ~${REAL_TOKENS} tokens, past the absolute handoff threshold of ${ABS_THRESHOLD} (independent of context-window percentage). Coordinator threads: run bb handoff --self --to <provider> --model <model> --replace, or bb handoff coordinator enable --self --rotate-at ${ABS_THRESHOLD}."
   fi
+elif [[ -n "$ABS_BAND_FILE" ]]; then
+  # P2-2: below threshold -- clear any stale band marker so climbing back
+  # into the same band number later (e.g. after a /compact drop) isn't
+  # suppressed by a band already marked "handled" before the drop.
+  rm -f "$ABS_BAND_FILE" 2>/dev/null || true
 fi
 
 SF=$(_ip_state_file "$SID")
