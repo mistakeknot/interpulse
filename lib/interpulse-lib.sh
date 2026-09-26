@@ -91,10 +91,16 @@ _ip_transcript_path() {
 # Real (provider-reported) transcript context, read from a bounded tail of
 # the transcript file rather than the whole thing (transcripts can run to
 # many MB). Ported from Clavain hooks/context-handoff.sh: the last
-# main-chain (isSidechain=false, type=assistant) record's
+# main-chain (isSidechain=false, type=assistant, message.model !=
+# "<synthetic>") record's
 # input_tokens + cache_creation_input_tokens + cache_read_input_tokens is
 # the measure, because that is what the model actually saw on its last
-# turn -- not a heuristic estimate.
+# turn -- not a heuristic estimate. Synthetic records are Claude Code's own
+# zero-usage markers for turns that ended on a 429/weekly-limit/OAuth-expiry
+# error; they are excluded here to match scripts/burn-report.py:83's skip
+# (`model == "<synthetic>"`) -- otherwise a coordinator whose last turn hit
+# one of these measures as 0 tokens and this hook goes silent right when a
+# high-burn coordinator is most likely to need the handoff nudge.
 #
 # Prints "<tokens> <model>" on stdout, tokens defaulting to 0 and model to
 # "unknown" if no usable record is found (missing file, no jq, malformed
@@ -117,7 +123,8 @@ _ip_transcript_tokens() {
       | select($obj != null)
       | select($obj.type == "assistant"
                and (($obj.isSidechain // false) == false)
-               and ($obj.message.usage != null))
+               and ($obj.message.usage != null)
+               and ($obj.message.model != "<synthetic>"))
       | (($obj.message.usage.input_tokens // 0)
          + ($obj.message.usage.cache_creation_input_tokens // 0)
          + ($obj.message.usage.cache_read_input_tokens // 0)) as $t

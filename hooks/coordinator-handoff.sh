@@ -7,11 +7,16 @@
 # conventions and hardened against a fail-open-state-drift finding from that
 # port's own security review (see "STATE PERSISTENCE" below).
 #
-# Context measure: the last main-chain (isSidechain=false, type=assistant)
-# record's input_tokens + cache_creation_input_tokens + cache_read_input_tokens,
+# Context measure: the last main-chain (isSidechain=false, type=assistant,
+# message.model != "<synthetic>") record's
+# input_tokens + cache_creation_input_tokens + cache_read_input_tokens,
 # via lib/interpulse-lib.sh's _ip_transcript_tokens (bounded 256 KiB tail
 # read, shared with hooks/context-monitor.sh's PostToolUse extension so both
 # mechanisms measure and threshold on the exact same absolute number).
+# Synthetic records (Claude Code's own zero-usage markers for rate-limit/
+# OAuth-expiry/similar turns, matching scripts/burn-report.py:83's skip) are
+# excluded so a turn that ends on one of those doesn't measure as 0 and go
+# silent.
 #
 # This is an ABSOLUTE threshold (default 100000 tokens), not a percentage of
 # the model's context window: context-monitor.sh's existing heuristic
@@ -60,6 +65,9 @@
 #                                    most recently modified) if that lookup
 #                                    comes up empty -- see
 #                                    find_clavain_coordinator_model() below.
+#                                    Full order: CLAVAIN_COORDINATOR_MODEL_CMD
+#                                    override -> PATH -> installed_plugins.json
+#                                    -> plugin cache -> hardcoded Sonnet.
 #                                    If neither locates a usable script, or
 #                                    the resolver can't be found or fails,
 #                                    this hook falls back to the same
@@ -68,7 +76,11 @@
 #                                    ("claude-code claude-sonnet-5") -- see
 #                                    resolve_coordinator_model() below. An
 #                                    Opus-class result is never honored for
-#                                    this role, from any path.
+#                                    this role, from any path; the resolver's
+#                                    provider/model output is also allowlist-
+#                                    validated (see _ip_valid_provider /
+#                                    _ip_valid_model below) before it is ever
+#                                    used to build a "Run:" command.
 #
 # STATE PERSISTENCE (fail-open-state-drift hardening):
 #
@@ -76,7 +88,11 @@
 #   the band file is written ONLY after this Stop reaches a fully determined
 #   outcome (silence because rotation is genuinely ok, a coordinator block,
 #   or a worker advisory) -- never before or during the bb lookups that
-#   outcome depends on.
+#   outcome depends on. The band file is also DELETED whenever context is
+#   measured below the threshold (P2-2): otherwise a session that dropped
+#   below threshold (e.g. via /compact) and later climbed back into the same
+#   band number would find that band already marked and stay silent, losing
+#   the required block for up to 25k tokens.
 #
 #   The Clavain original wrote the band file BEFORE any bb lookup, as a
 #   throttle optimization. That means a bb failure/timeout partway through
@@ -89,6 +105,11 @@
 #   below `exit`s before the band file is ever touched, so the very next
 #   Stop (even one token later, same band) retries against bb instead of
 #   trusting a determination that never completed.
+#
+#   Reading the band file back (P2-3) never trusts a bare `&&`-chained
+#   command substitution: `cat` on an unreadable file (foreign-owned state
+#   dir, bad restore, permission change) must not trip the script-wide ERR
+#   trap and silence the hook permanently -- see the PREV_BAND read below.
 #
 #   Model resolution (resolve_coordinator_model) never contributes to this
 #   either: it always returns a usable provider/model pair (falling back to
@@ -127,14 +148,43 @@
 # `--self` command issued after it resolves to the archived source, not the
 # successor.
 #
+# Runtime budget (P2-4): each external call (bb, the resolver) is capped at
+# 1s via `timeout`, and an overall elapsed-time check skips the remaining
+# OPTIONAL lookups (the live context-window read, the external resolver)
+# once this Stop has already run for about 6s, falling back to their
+# documented safe defaults ("window unknown" / hardcoded Sonnet) instead.
+# hooks.json's Stop entry timeout is 10s, giving headroom above the ~4s
+# worst case (status + list/context + resolver, each capped at 1s).
+#
 # Coordinator: blocking `{"decision":"block","reason":...}`.
 # Worker: advisory `{"systemMessage":...}`, never a block.
-# Silent (exit 0, no output) on: jq missing, INTERPULSE_COORD_HOOK=off,
+# Silent (exit 0, no output) on: jq missing, a headless/`claude -p` session
+# or a dispatched child that inherited a coordinator's BB_THREAD_ID (see
+# _ip_is_headless below -- Sylveste-364), INTERPULSE_COORD_HOOK=off,
 # no BB_THREAD_ID, stop_hook_active, below threshold, a same-band repeat
 # that already reached a determined outcome, or any bb lookup
 # failure/timeout (which never persists band state -- see above).
+#
+# Known limits: requires bash >= 4.4 (`${x,,}`) and coreutils `timeout`
+# (stock macOS bash/coreutils are not supported -- the hook exits 1 there
+# and never enforces); PostToolUse's `additionalContext` output shape in
+# hooks/context-monitor.sh is unchanged by this hardening pass.
 set -uo pipefail
 trap 'exit 0' ERR
+
+HOOK_START_S=$(date +%s)
+# Optional-call time budget (P2-4): once this Stop has run this long,
+# remaining OPTIONAL lookups (the live context-window read, the external
+# resolver) are skipped in favor of their documented safe defaults, instead
+# of risking the hooks.json Stop timeout and losing the whole determination
+# (including a real block) to a slow/hung external process. Overridable only
+# for tests.
+_ip_elapsed_over_budget() {
+    local budget="${INTERPULSE_COORD_TIME_BUDGET_S:-6}"
+    local now
+    now=$(date +%s) || return 1
+    (( now - HOOK_START_S >= budget ))
+}
 
 SCRIPT_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)"
 # shellcheck source=lib/interpulse-lib.sh
@@ -144,6 +194,57 @@ command -v jq >/dev/null 2>&1 || exit 0
 
 [[ "${INTERPULSE_COORD_HOOK:-}" == "off" ]] && exit 0
 
+# --- Headless / dispatched-child guard (P1-1, Sylveste-364) ---------------
+# A Stop hook's decision:"block" is injected as a NEW PROMPT TURN. In a
+# headless `claude -p`/`--print` run that injected turn's reply REPLACES the
+# reply the caller actually asked for (observed live 2026-07-20: a scripted
+# data pass lost 44/45 responses to hook chatter -- Sylveste-364).
+#
+# Separately: Clavain's scripts/dispatch.sh claude backend runs `claude -p`
+# with the parent's environment, and nothing unsets BB_THREAD_ID, so a
+# dispatched validation/review child inherits its coordinator PARENT's
+# thread ID. Without this guard, that child's own Stop could resolve (via
+# `bb handoff coordinator status --self`) to the marked PARENT thread and,
+# if the block's "Run: ... --replace" is obeyed, archive the live
+# coordinator. The headless check below covers this: a dispatched child is
+# itself a `claude -p` process, so it is caught the same way.
+#
+# This is a self-contained port of Clavain hooks/lib-headless.sh's
+# clavain_is_headless -- deliberately NOT sourced from an installed Clavain
+# (this hook never reimplements or imports Clavain internals beyond calling
+# scripts/coordinator-model.sh as an external command; see the
+# CLAVAIN_COORDINATOR_MODEL_CMD comment above). Walks up to 8 process
+# ancestors looking for a `claude` process; if found running as
+# `-p`/`--print`, this session is headless. Fails OPEN (returns 1, "not
+# headless") on any `ps` error, so a detector bug never suppresses the
+# interactive block this hook exists to emit.
+#
+# A cheaper same-session check (comparing the Stop payload's session against
+# whatever `bb thread context --self` reports) was considered too, but this
+# hook has no bb call that is unconditionally made before the headless
+# check -- adding one here would cost an extra bb round trip on every single
+# Stop, not just above threshold, which this hook's whole design (bb
+# consulted only once we already know we're above threshold) avoids. Absent
+# a documented session-id field on an already-budgeted bb call, this stays
+# a ps-only check.
+_ip_is_headless() {
+    local pid=$$ args
+    local _i
+    for _i in 1 2 3 4 5 6 7 8; do
+        pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')" || return 1
+        [[ -z "$pid" || "$pid" == "0" || "$pid" == "1" ]] && return 1
+        args="$(ps -o args= -p "$pid" 2>/dev/null)" || return 1
+        if [[ "$args" == *claude* ]]; then
+            case " $args " in
+                *" -p "*|*" --print "*) return 0 ;;
+            esac
+            return 1
+        fi
+    done
+    return 1
+}
+_ip_is_headless && exit 0
+
 # Not a bb session: nothing to hand off.
 [[ -n "${BB_THREAD_ID:-}" ]] || exit 0
 
@@ -152,9 +253,17 @@ INPUT="$(cat)"
 STOP_ACTIVE="$(jq -r '.stop_hook_active // false' <<<"$INPUT" 2>/dev/null)" || exit 0
 [[ "$STOP_ACTIVE" == "true" ]] && exit 0
 
-SESSION_ID="$(jq -r '.session_id // "unknown"' <<<"$INPUT" 2>/dev/null)" || exit 0
 TRANSCRIPT="$(_ip_transcript_path "$INPUT")"
 [[ -n "$TRANSCRIPT" && -f "$TRANSCRIPT" ]] || exit 0
+
+SESSION_ID="$(jq -r '.session_id // empty' <<<"$INPUT" 2>/dev/null)" || exit 0
+if [[ -z "$SESSION_ID" ]]; then
+    # Missing session_id (P3): the literal "unknown" is shared by every such
+    # session, so they'd all throttle each other's band file. Hash the
+    # transcript path instead -- distinct transcripts get distinct keys.
+    SESSION_ID="unknown-$(printf '%s' "$TRANSCRIPT" | cksum 2>/dev/null | cut -d' ' -f1)"
+    [[ -n "$SESSION_ID" && "$SESSION_ID" != "unknown-" ]] || SESSION_ID="unknown"
+fi
 
 THRESHOLD="${INTERPULSE_COORD_CONTEXT_TOKENS:-100000}"
 [[ "$THRESHOLD" =~ ^[0-9]+$ ]] || exit 0
@@ -171,12 +280,24 @@ CONTEXT_TOKENS="${RESULT%% *}"
 MODEL="${RESULT#* }"
 
 [[ "$CONTEXT_TOKENS" =~ ^[0-9]+$ ]] || exit 0
-(( CONTEXT_TOKENS < THRESHOLD )) && exit 0
+if (( CONTEXT_TOKENS < THRESHOLD )); then
+    # P2-2: clear any stale band marker so re-entering a later band (e.g.
+    # after a /compact drop and climbing back up) isn't suppressed by a
+    # band number that was already "handled" before the drop.
+    [[ "$STATE_WRITABLE" == true ]] && rm -f "$BAND_FILE" 2>/dev/null
+    exit 0
+fi
 
 # --- Band throttle: read only (write deferred until a real outcome exists) --
 band=$(( CONTEXT_TOKENS / 25000 ))
 PREV_BAND=""
-[[ -f "$BAND_FILE" ]] && PREV_BAND="$(cat "$BAND_FILE" 2>/dev/null)"
+if [[ -f "$BAND_FILE" ]]; then
+    # P2-3: never let a failing `cat` (unreadable file: foreign-owned state
+    # dir, chmod 000, bad restore) reach the script-wide ERR trap as the
+    # tail of an `&&` list -- that would silence this hook on every Stop,
+    # permanently, with no bb call and no retry.
+    PREV_BAND="$(cat "$BAND_FILE" 2>/dev/null)" || PREV_BAND=""
+fi
 [[ "$PREV_BAND" == "$band" ]] && exit 0
 
 _persist_band() {
@@ -184,15 +305,36 @@ _persist_band() {
     printf '%s' "$band" > "$BAND_FILE" 2>/dev/null || true
 }
 
+# Provider must be a bb-recognized backend name; model must look like a
+# real model identifier (no spaces, no shell metacharacters). Anything else
+# from the resolver -- including injection attempts (";", spaces) or an
+# unknown provider -- is rejected before it ever becomes part of a "Run:"
+# command (P3 allowlist hardening; a substring Opus denylist alone lets
+# e.g. "claude-fable-5-1" straight through, and validates nothing about the
+# provider).
+_ip_valid_provider() {
+    case "$1" in
+        claude-code|codex) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+_ip_valid_model() {
+    [[ "$1" =~ ^[a-z0-9][a-z0-9._-]*$ ]]
+}
+
 # Locate an installed Clavain's scripts/coordinator-model.sh when the plain
 # name isn't on PATH. Established pattern, not invented here:
 #   1. installed_plugins.json's "clavain@<marketplace>" installPath -- the
 #      same lookup Clavain's own hooks/release-canary-check.sh does against
 #      that file (installPath existence + a parseable plugin.json).
+#      "clavain@interagency-marketplace" (the canonical marketplace key) is
+#      preferred when present; any other "clavain@*" key is used only if
+#      that exact key is absent.
 #   2. Failing that, the plugin-cache glob interline's scripts/statusline.sh
 #      already uses to find Clavain's version
 #      (~/.claude/plugins/cache/*/clavain/*), taking the most recently
-#      modified match.
+#      modified match that isn't marked `.orphaned_at` and has a parseable
+#      plugin.json.
 # Overridable for tests via CLAVAIN_INSTALLED_FILE (matches
 # release-canary-check.sh's own override name) and CLAUDE_PLUGIN_CACHE_ROOT
 # (matches scripts/check-install-updates.sh's override name). Prints nothing
@@ -204,19 +346,35 @@ find_clavain_coordinator_model() {
 
     if command -v jq >/dev/null 2>&1 && [[ -f "$installed_file" ]]; then
         root="$(jq -r '
-            .plugins // {} | to_entries[]
-            | select(.key | test("^clavain@"))
-            | .value[0].installPath // empty
-        ' "$installed_file" 2>/dev/null | head -1)" || root=""
+            .plugins // {} | to_entries
+            | (map(select(.key == "clavain@interagency-marketplace"))
+               + map(select(.key | test("^clavain@"))))
+            | .[0].value[0].installPath // empty
+        ' "$installed_file" 2>/dev/null)" || root=""
+        if [[ -n "$root" ]]; then
+            # A usable install has a PARSEABLE plugin.json, not merely an
+            # installPath that exists (a half-written or corrupted install
+            # is not trusted just because the directory is there).
+            jq -e . "$root/.claude-plugin/plugin.json" >/dev/null 2>&1 || root=""
+        fi
     fi
 
     if [[ -z "$root" || ! -d "$root" ]]; then
         root=""
-        for candidate in $(ls -td "$cache_root"/*/clavain/* 2>/dev/null); do
+        local newest_mtime=-1 mtime
+        shopt -s nullglob
+        for candidate in "$cache_root"/*/clavain/*; do
             [[ -d "$candidate" ]] || continue
-            root="$candidate"
-            break
+            [[ -e "$candidate/.orphaned_at" ]] && continue
+            jq -e . "$candidate/.claude-plugin/plugin.json" >/dev/null 2>&1 || continue
+            mtime="$(stat -c %Y "$candidate" 2>/dev/null || stat -f %m "$candidate" 2>/dev/null || echo -1)"
+            [[ "$mtime" =~ ^-?[0-9]+$ ]] || mtime=-1
+            if (( mtime > newest_mtime )); then
+                newest_mtime="$mtime"
+                root="$candidate"
+            fi
         done
+        shopt -u nullglob
     fi
 
     [[ -n "$root" && -f "$root/scripts/coordinator-model.sh" ]] || return 1
@@ -228,9 +386,18 @@ find_clavain_coordinator_model() {
 # "<provider> <model>" pair; never leaves the caller without one, and never
 # an Opus-class model.
 resolve_coordinator_model() {
-    local cmd="${CLAVAIN_COORDINATOR_MODEL_CMD:-}"
-    local resolved="" provider model
+    local cmd="" resolved="" provider model
 
+    # P2-4: this call is OPTIONAL (a hardcoded Sonnet fallback always covers
+    # it) -- past the time budget, skip straight to that fallback rather
+    # than risk the search/invocation pushing this Stop past its hooks.json
+    # timeout.
+    if _ip_elapsed_over_budget; then
+        printf '%s %s\n' "claude-code" "claude-sonnet-5"
+        return 0
+    fi
+
+    cmd="${CLAVAIN_COORDINATOR_MODEL_CMD:-}"
     if [[ -z "$cmd" ]]; then
         cmd="coordinator-model.sh"
         if ! command -v "$cmd" >/dev/null 2>&1; then
@@ -242,7 +409,7 @@ resolve_coordinator_model() {
 
     if command -v "$cmd" >/dev/null 2>&1; then
         if command -v timeout >/dev/null 2>&1; then
-            resolved="$(timeout 2 "$cmd" 2>/dev/null)" || resolved=""
+            resolved="$(timeout 1 "$cmd" 2>/dev/null)" || resolved=""
         else
             resolved="$("$cmd" 2>/dev/null)" || resolved=""
         fi
@@ -250,11 +417,14 @@ resolve_coordinator_model() {
 
     provider="${resolved%% *}"
     model="${resolved#* }"
-    if [[ -z "$resolved" || "$provider" == "$resolved" || -z "$provider" || -z "$model" ]]; then
-        # coordinator-model.sh not on PATH, or it failed/produced unusable
-        # output: fail soft to the exact fallback pair it documents for its
+    if [[ -z "$resolved" || "$provider" == "$resolved" || -z "$provider" || -z "$model" ]] \
+        || ! _ip_valid_provider "$provider" || ! _ip_valid_model "$model"; then
+        # coordinator-model.sh not on PATH, it failed/produced unusable
+        # output, or its output didn't pass the provider/model allowlist
+        # (P3 -- catches injection attempts and unknown providers, not just
+        # Opus): fail soft to the exact fallback pair it documents for its
         # own error paths. This never blocks a directive on the resolver
-        # being unavailable.
+        # being unavailable or untrustworthy.
         provider="claude-code"
         model="claude-sonnet-5"
     fi
@@ -262,7 +432,8 @@ resolve_coordinator_model() {
     # Defense in depth: this role never runs Opus, regardless of what a
     # broken or misconfigured external resolver printed. coordinator-model.sh
     # already refuses Opus internally; this is a second, independent check
-    # against forwarding one anyway.
+    # against forwarding one anyway. (The allowlist above does not catch
+    # this alone: "claude-opus-5-5" matches the model charset.)
     case "${model,,}" in
         *opus*) provider="claude-code"; model="claude-sonnet-5" ;;
     esac
@@ -270,12 +441,23 @@ resolve_coordinator_model() {
     printf '%s %s\n' "$provider" "$model"
 }
 
+# Strip a trailing dated-snapshot suffix (-YYYYMMDD) before comparing model
+# strings (P3): a transcript that records a dated snapshot ID would
+# otherwise never equal the resolver's undated alias, so every band would
+# emit a spurious --replace even when the coordinator is already on the
+# right model family.
+_ip_strip_dated_suffix() {
+    local m="$1"
+    [[ "$m" =~ ^(.*)-[0-9]{8}$ ]] && m="${BASH_REMATCH[1]}"
+    printf '%s' "$m"
+}
+
 # --- Who counts as a coordinator (bb consulted fresh, once per band) ---
 # Every bb-lookup failure below exits WITHOUT calling _persist_band, so the
 # band file never claims this Stop reached a determination it didn't.
 command -v bb >/dev/null 2>&1 || exit 0
 TIMEOUT_CMD=()
-command -v timeout >/dev/null 2>&1 && TIMEOUT_CMD=(timeout 2)
+command -v timeout >/dev/null 2>&1 && TIMEOUT_CMD=(timeout 1)
 
 IS_COORDINATOR="false"
 ROTATION_ENABLED="false"
@@ -287,8 +469,8 @@ MARKED="$(jq -r 'if .marking == null then "false" else "true" end' <<<"$STATUS_J
 
 if [[ "$MARKED" == "true" ]]; then
     IS_COORDINATOR="true"
-    ROTATION_ENABLED="$(jq -r '.rotationEnabled // false' <<<"$STATUS_JSON" 2>/dev/null)"
-    ROTATE_AT="$(jq -r '.marking.rotateAt // empty' <<<"$STATUS_JSON" 2>/dev/null)"
+    ROTATION_ENABLED="$(jq -r '.rotationEnabled // false' <<<"$STATUS_JSON" 2>/dev/null)" || true
+    ROTATE_AT="$(jq -r '.marking.rotateAt // empty' <<<"$STATUS_JSON" 2>/dev/null)" || true
 else
     # --include-hidden: a hidden child still makes this thread a coordinator.
     CHILDREN_JSON="$("${TIMEOUT_CMD[@]}" bb thread list --parent-thread "$BB_THREAD_ID" --include-hidden --json 2>/dev/null)" || exit 0
@@ -309,11 +491,19 @@ if [[ "$IS_COORDINATOR" == "true" ]]; then
         if [[ "$IS_FRACTION" == "yes" ]]; then
             WINDOW="${INTERPULSE_COORD_CONTEXT_WINDOW:-}"
             if [[ -z "$WINDOW" ]]; then
-                # `|| true`: a nonzero exit here (bb failure/timeout) falls
-                # through to "window unknown" below, never toward silence.
-                CONTEXT_JSON="$("${TIMEOUT_CMD[@]}" bb thread context "$BB_THREAD_ID" --json 2>/dev/null)" || true
-                WINDOW="$(jq -r '.usage.modelContextWindow // empty' <<<"$CONTEXT_JSON" 2>/dev/null)" || true
-                [[ "$WINDOW" =~ ^[0-9]+$ ]] || WINDOW=""
+                if _ip_elapsed_over_budget; then
+                    # P2-4: this lookup is OPTIONAL (see the fallback
+                    # below) -- past the time budget, treat it the same as
+                    # a failed/timed-out call rather than risk pushing this
+                    # Stop past its hooks.json timeout.
+                    WINDOW=""
+                else
+                    # `|| true`: a nonzero exit here (bb failure/timeout) falls
+                    # through to "window unknown" below, never toward silence.
+                    CONTEXT_JSON="$("${TIMEOUT_CMD[@]}" bb thread context "$BB_THREAD_ID" --json 2>/dev/null)" || true
+                    WINDOW="$(jq -r '.usage.modelContextWindow // empty' <<<"$CONTEXT_JSON" 2>/dev/null)" || true
+                    [[ "$WINDOW" =~ ^[0-9]+$ ]] || WINDOW=""
+                fi
             fi
 
             if [[ "$WINDOW" =~ ^[0-9]+$ ]]; then
@@ -352,7 +542,7 @@ if [[ "$IS_COORDINATOR" == "true" ]]; then
     fi
 
     MODEL_OK="false"
-    [[ "$MODEL" == "$RESOLVED_MODEL" ]] && MODEL_OK="true"
+    [[ "$(_ip_strip_dated_suffix "$MODEL")" == "$(_ip_strip_dated_suffix "$RESOLVED_MODEL")" ]] && MODEL_OK="true"
 
     if [[ "$ROTATION_OK" == "true" && "$MODEL_OK" == "true" ]]; then
         _persist_band
