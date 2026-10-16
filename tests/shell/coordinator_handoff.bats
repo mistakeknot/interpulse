@@ -1,8 +1,7 @@
 #!/usr/bin/env bats
 bats_require_minimum_version 1.5.0
 # Tests for hooks/coordinator-handoff.sh, ported (not copied) from Clavain
-# hooks/context-handoff.sh (mk-42j9.12/.13, "coordinators on Sonnet, context
-# handoff at 100k").
+# hooks/context-handoff.sh (bead mk-42j9.13).
 #
 # The hook is a Stop hook. It measures REAL transcript context from the last
 # main-chain assistant record (via lib/interpulse-lib.sh's
@@ -70,7 +69,7 @@ if [[ "\$1 \$2 \$3" == "handoff coordinator status" ]]; then
 fi
 if [[ "\$1 \$2" == "thread list" ]]; then
     printf '%s\n' '$children_json'
-    exit ${exit_code}
+    exit \${STUB_CHILDREN_EXIT:-${exit_code}}
 fi
 if [[ "\$1 \$2" == "thread context" ]]; then
     printf '%s\n' '$context_json'
@@ -228,13 +227,22 @@ hook_input() {  # $1 = transcript path, $2 = stop_hook_active (true/false), $3 =
     [ ! -e "$STATE_DIR/bb-calls" ]
 }
 
-@test "coordinator-handoff: a truncated last line does not stop the hook from reading the prior valid record" {
+@test "coordinator-handoff: a truncated last record fails open (silent), not older usage" {
     make_bb_stub '{"marking":{},"rotationEnabled":false}'
     run bash "$HOOK" <<< "$(hook_input "$FIXTURES/truncated.jsonl")"
     [ "$status" -eq 0 ]
-    [ -n "$output" ]
-    decision="$(jq -r '.decision' <<<"$output")"
-    [ "$decision" = "block" ]
+    [ -z "$output" ]
+    [ ! -e "$STATE_DIR/bb-calls" ]
+}
+
+@test "coordinator-handoff: a bounded tail that starts mid-record still measures the last record" {
+    big="$STATE_DIR/big.jsonl"
+    { printf '{"type":"user","message":{"content":"'; head -c 300000 /dev/zero | tr '\0' x; printf '"}}\n'; } > "$big"
+    tail -n 1 "$FIXTURES/130k-opus.jsonl" >> "$big"
+    make_bb_stub '{"marking":{},"rotationEnabled":false}'
+    run bash "$HOOK" <<< "$(hook_input "$big")"
+    [ "$status" -eq 0 ]
+    [ "$(jq -r '.decision' <<<"$output")" = "block" ]
 }
 
 @test "coordinator-handoff: rotation enabled between bands is re-read, not frozen from the first check" {
@@ -272,7 +280,7 @@ EOF
     reason1="$(jq -r '.reason' <<<"$output")"
     [ "$decision" = "block" ]
     [[ "$reason1" == *"coordinator enable"* ]]
-    [[ "$reason1" != *"--replace"* ]]
+    [[ "$reason1" == *"coordinator enable"*"--replace"* ]]
 
     run bash "$HOOK" <<< "$(hook_input "$FIXTURES/160k-sonnet.jsonl" false "sess-reread")"
     [ "$status" -eq 0 ]
@@ -392,10 +400,11 @@ EOF
 @test "coordinator-handoff: a children-list bb failure does not persist the band either" {
     # Status lookup succeeds (not marked), but the children lookup that
     # follows fails. This must not persist the band as checked.
-    make_bb_stub '{"marking":null,"rotationEnabled":false}' '[]' 0 1
-    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-childfail")"
+    make_bb_stub '{"marking":null,"rotationEnabled":false}' '[]' 0 0
+    STUB_CHILDREN_EXIT=1 run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-childfail")"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
+    grep -q "thread list" "$STATE_DIR/bb-calls"
 
     make_bb_stub '{"marking":null,"rotationEnabled":false}' '[{"id":"thr_c","archivedAt":null}]' 0 0
     run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-childfail")"
@@ -547,6 +556,34 @@ EOF
 
     make_bb_stub '{"marking":{},"rotationEnabled":false}'
     run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-headless")"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ ! -e "$STATE_DIR/bb-calls" ]
+}
+
+@test "coordinator-handoff: a wrapper shell mentioning claude does not mask a headless claude ancestor" {
+    cat > "$STUB_DIR/ps" <<'EOF'
+#!/usr/bin/env bash
+want=""
+for a in "$@"; do case "$a" in ppid=|args=) want="$a";; esac; done
+pid=""
+for a in "$@"; do case "$a" in [0-9]*) pid="$a";; esac; done
+if [[ "$want" == "ppid=" ]]; then
+    case "$pid" in
+        4242) echo 4243 ;;
+        *) echo 4242 ;;
+    esac
+    exit 0
+fi
+case "$pid" in
+    4242) echo '/bin/sh -c /home/u/.claude/plugins/x/hooks/coordinator-handoff.sh' ;;
+    4243) echo 'claude -p do the thing' ;;
+    *) exit 1 ;;
+esac
+EOF
+    chmod +x "$STUB_DIR/ps"
+    make_bb_stub '{"marking":{},"rotationEnabled":false}'
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-wrapper")"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
     [ ! -e "$STATE_DIR/bb-calls" ]
@@ -715,4 +752,12 @@ EOF
     run bash "$HOOK" <<< "$(hook_input "$FIXTURES/105k-sonnet-dated.jsonl")"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
+}
+
+@test "coordinator-handoff: a Sonnet coordinator with rotation off gets enable AND the ready replace command" {
+    make_bb_stub '{"marking":{},"rotationEnabled":false}'
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-sonnet.jsonl" false "sess-enable-replace")"
+    [ "$status" -eq 0 ]
+    reason="$(jq -r '.reason' <<<"$output")"
+    [[ "$reason" == *"bb handoff coordinator enable --self --rotate-at 100000"*"--replace"* ]]
 }

@@ -118,18 +118,36 @@ _ip_transcript_tokens() {
   [[ -n "$transcript" && -f "$transcript" ]] || { printf '%s %s\n' "$tokens" "$model"; return 0; }
   command -v jq >/dev/null 2>&1 || { printf '%s %s\n' "$tokens" "$model"; return 0; }
 
-  result="$(tail -c "$tail_bytes" "$transcript" 2>/dev/null | jq -R -r '
-      (try fromjson catch empty) as $obj
-      | select($obj != null)
-      | select($obj.type == "assistant"
-               and (($obj.isSidechain // false) == false)
-               and ($obj.message.usage != null)
-               and ($obj.message.model != "<synthetic>"))
-      | (($obj.message.usage.input_tokens // 0)
-         + ($obj.message.usage.cache_creation_input_tokens // 0)
-         + ($obj.message.usage.cache_read_input_tokens // 0)) as $t
-      | "\($t) \($obj.message.model // "unknown")"
-  ' 2>/dev/null | tail -n 1)"
+  # The bounded tail may begin mid-record: drop that partial first line,
+  # but only when the file is actually larger than the tail. Any other line
+  # that does not parse (an incomplete trailing record, corruption) means the
+  # measurement is unreliable, so report "0 unknown" and let callers stay
+  # silent rather than act on older usage.
+  local size data
+  size="$(wc -c <"$transcript" 2>/dev/null | tr -d ' ')" || size=0
+  data="$(tail -c "$tail_bytes" "$transcript" 2>/dev/null)" || data=""
+  if [[ "$size" =~ ^[0-9]+$ ]] && (( size > tail_bytes )); then
+    data="$(printf '%s\n' "$data" | tail -n +2)"
+  fi
+
+  result="$(printf '%s\n' "$data" | jq -R -n -r '
+      [inputs | select(length > 0)
+       | (try fromjson catch "BAD")] as $recs
+      | if any($recs[]; . == "BAD") then empty
+        else
+          [$recs[]
+           | select(type == "object"
+                    and .type == "assistant"
+                    and ((.isSidechain // false) == false)
+                    and (.message.usage != null)
+                    and (.message.model != "<synthetic>"))
+           | ((.message.usage.input_tokens // 0)
+              + (.message.usage.cache_creation_input_tokens // 0)
+              + (.message.usage.cache_read_input_tokens // 0)) as $t
+           | "\($t) \(.message.model // "unknown")"]
+          | last // empty
+        end
+  ' 2>/dev/null)"
 
   if [[ -n "$result" ]]; then
     local t="${result%% *}"

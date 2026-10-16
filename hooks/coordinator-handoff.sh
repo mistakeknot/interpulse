@@ -2,8 +2,8 @@
 # Stop hook: coordinator-handoff — nudge bb coordinator/worker threads to
 # hand off once REAL transcript context crosses an absolute token threshold.
 #
-# Ported (not copied) from Clavain hooks/context-handoff.sh (mk-42j9.12/.13,
-# "coordinators on Sonnet, context handoff at 100k"), adapted to interpulse's
+# Ported (not copied) from Clavain hooks/context-handoff.sh (bead mk-42j9.13),
+# adapted to interpulse's
 # conventions and hardened against a fail-open-state-drift finding from that
 # port's own security review (see "STATE PERSISTENCE" below).
 #
@@ -160,7 +160,7 @@
 # Worker: advisory `{"systemMessage":...}`, never a block.
 # Silent (exit 0, no output) on: jq missing, a headless/`claude -p` session
 # or a dispatched child that inherited a coordinator's BB_THREAD_ID (see
-# _ip_is_headless below -- Sylveste-364), INTERPULSE_COORD_HOOK=off,
+# _ip_is_headless below), INTERPULSE_COORD_HOOK=off,
 # no BB_THREAD_ID, stop_hook_active, below threshold, a same-band repeat
 # that already reached a determined outcome, or any bb lookup
 # failure/timeout (which never persists band state -- see above).
@@ -194,11 +194,11 @@ command -v jq >/dev/null 2>&1 || exit 0
 
 [[ "${INTERPULSE_COORD_HOOK:-}" == "off" ]] && exit 0
 
-# --- Headless / dispatched-child guard (P1-1, Sylveste-364) ---------------
+# --- Headless / dispatched-child guard (P1-1) ---------------
 # A Stop hook's decision:"block" is injected as a NEW PROMPT TURN. In a
 # headless `claude -p`/`--print` run that injected turn's reply REPLACES the
 # reply the caller actually asked for (observed live 2026-07-20: a scripted
-# data pass lost 44/45 responses to hook chatter -- Sylveste-364).
+# data pass lost 44/45 responses to hook chatter).
 #
 # Separately: Clavain's scripts/dispatch.sh claude backend runs `claude -p`
 # with the parent's environment, and nothing unsets BB_THREAD_ID, so a
@@ -228,13 +228,18 @@ command -v jq >/dev/null 2>&1 || exit 0
 # a documented session-id field on an already-budgeted bb call, this stays
 # a ps-only check.
 _ip_is_headless() {
-    local pid=$$ args
+    local pid=$$ args exe
     local _i
     for _i in 1 2 3 4 5 6 7 8; do
         pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')" || return 1
         [[ -z "$pid" || "$pid" == "0" || "$pid" == "1" ]] && return 1
         args="$(ps -o args= -p "$pid" 2>/dev/null)" || return 1
-        if [[ "$args" == *claude* ]]; then
+        # Match the executable's basename only, so a wrapper shell whose
+        # command line merely mentions "claude" (a plugin path) is skipped
+        # and the walk continues to the real claude ancestor.
+        exe="${args%% *}"
+        exe="${exe##*/}"
+        if [[ "$exe" == "claude" ]]; then
             case " $args " in
                 *" -p "*|*" --print "*) return 0 ;;
             esac
@@ -463,8 +468,10 @@ _ip_strip_dated_suffix() {
 # Every bb-lookup failure below exits WITHOUT calling _persist_band, so the
 # band file never claims this Stop reached a determination it didn't.
 command -v bb >/dev/null 2>&1 || exit 0
-TIMEOUT_CMD=()
-command -v timeout >/dev/null 2>&1 && TIMEOUT_CMD=(timeout 1)
+# Every external call must be hard-bounded: without `timeout` we cannot
+# bound them, so stay silent. `-k 0.2` sends SIGKILL if SIGTERM is ignored.
+command -v timeout >/dev/null 2>&1 || exit 0
+TIMEOUT_CMD=(timeout -k 0.2 1)
 
 IS_COORDINATOR="false"
 ROTATION_ENABLED="false"
@@ -479,6 +486,8 @@ if [[ "$MARKED" == "true" ]]; then
     ROTATION_ENABLED="$(jq -r '.rotationEnabled // false' <<<"$STATUS_JSON" 2>/dev/null)" || true
     ROTATE_AT="$(jq -r '.marking.rotateAt // empty' <<<"$STATUS_JSON" 2>/dev/null)" || true
 else
+    # Overall deadline: skip the second lookup if the first ate the budget.
+    _ip_elapsed_over_budget && exit 0
     # --include-hidden: a hidden child still makes this thread a coordinator.
     CHILDREN_JSON="$("${TIMEOUT_CMD[@]}" bb thread list --parent-thread "$BB_THREAD_ID" --include-hidden --json 2>/dev/null)" || exit 0
     [[ -n "$CHILDREN_JSON" ]] || exit 0
@@ -567,8 +576,10 @@ if [[ "$IS_COORDINATOR" == "true" ]]; then
             # same `enable` is redundant. Force the handoff instead.
             NEED_REPLACE="true"
         else
+            # Always follow `enable` with the ready `--replace` command so
+            # the directive is complete in one pass.
             NEED_ENABLE="true"
-            [[ "$MODEL_OK" != "true" ]] && NEED_REPLACE="true"
+            NEED_REPLACE="true"
         fi
     else
         [[ "$MODEL_OK" != "true" ]] && NEED_REPLACE="true"
