@@ -175,7 +175,7 @@ LEVEL=$(_ip_max_level "${PRESSURE_LEVEL:-}" "${CONTEXT_LEVEL:-}")
 
 # Debounce: exponential backoff while a level PERSISTS; escalation bypasses.
 #
-# PERFORMANCE (fixed 2026-07-31, context-budget audit — bead Sylveste-qhy5):
+# PERFORMANCE (fixed 2026-07-31, context-budget audit):
 #   This was a flat 5-call debounce, which meant a session that reached a level
 #   re-warned every 5 tool calls for the rest of its life. Measured across the
 #   80 most recent transcripts: 4,362 emissions costing 222,765 est. tokens,

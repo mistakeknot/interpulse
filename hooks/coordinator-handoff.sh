@@ -420,10 +420,10 @@ resolve_coordinator_model() {
     fi
 
     if command -v "$cmd" >/dev/null 2>&1; then
+        # Hard bound: SIGKILL follows SIGTERM after 0.2s. Without timeout the
+        # resolver is not run and the documented fallback pair is used.
         if command -v timeout >/dev/null 2>&1; then
-            resolved="$(timeout 1 "$cmd" 2>/dev/null)" || resolved=""
-        else
-            resolved="$("$cmd" 2>/dev/null)" || resolved=""
+            resolved="$(timeout -k 0.2 1 "$cmd" 2>/dev/null)" || resolved=""
         fi
     fi
 

@@ -126,8 +126,14 @@ _ip_transcript_tokens() {
   local size data
   size="$(wc -c <"$transcript" 2>/dev/null | tr -d ' ')" || size=0
   data="$(tail -c "$tail_bytes" "$transcript" 2>/dev/null)" || data=""
+  # Only when the cut really fell inside a record: if the byte just before
+  # the tail is a newline, the first tail line is complete and is kept.
   if [[ "$size" =~ ^[0-9]+$ ]] && (( size > tail_bytes )); then
-    data="$(printf '%s\n' "$data" | tail -n +2)"
+    local prev
+    prev="$(tail -c "$((tail_bytes + 1))" "$transcript" 2>/dev/null | head -c 1 | od -An -tx1 | tr -d ' \n')"
+    if [[ "$prev" != "0a" ]]; then
+      data="$(printf '%s\n' "$data" | tail -n +2)"
+    fi
   fi
 
   result="$(printf '%s\n' "$data" | jq -R -n -r '

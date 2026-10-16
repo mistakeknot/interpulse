@@ -245,6 +245,38 @@ hook_input() {  # $1 = transcript path, $2 = stop_hook_active (true/false), $3 =
     [ "$(jq -r '.decision' <<<"$output")" = "block" ]
 }
 
+@test "coordinator-handoff: a complete malformed record exactly at the tail boundary fails open" {
+    big="$STATE_DIR/boundary.jsonl"
+    last="$(tail -n 1 "$FIXTURES/130k-opus.jsonl")"
+    last_len=$(( ${#last} + 1 ))
+    pad=$(( 262144 - last_len - 5 ))
+    { printf '{"type":"user","message":{"content":"first"}}\n'
+      printf '{bad'; head -c "$pad" /dev/zero | tr '\0' x; printf '\n'
+      printf '%s\n' "$last"; } > "$big"
+    [ "$(tail -c 262145 "$big" | head -c 1 | od -An -tx1 | tr -d ' \n')" = "0a" ]
+    make_bb_stub '{"marking":{},"rotationEnabled":false}'
+    run bash "$HOOK" <<< "$(hook_input "$big")"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ ! -e "$STATE_DIR/bb-calls" ]
+}
+
+@test "coordinator-handoff: a resolver that ignores SIGTERM is killed within the hard bound" {
+    cat > "$STUB_DIR/coordinator-model.sh" <<'EOF'
+#!/usr/bin/env bash
+trap '' TERM
+sleep 20
+EOF
+    chmod +x "$STUB_DIR/coordinator-model.sh"
+    make_bb_stub '{"marking":{},"rotationEnabled":false}'
+    start=$SECONDS
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-termresolver")"
+    elapsed=$(( SECONDS - start ))
+    [ "$status" -eq 0 ]
+    [ "$elapsed" -lt 8 ]
+    [ "$(jq -r '.decision' <<<"$output")" = "block" ]
+}
+
 @test "coordinator-handoff: rotation enabled between bands is re-read, not frozen from the first check" {
     COUNTER="$STATE_DIR/status-calls"
     cat > "$STUB_DIR/bb" <<EOF
