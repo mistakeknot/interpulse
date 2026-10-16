@@ -6,6 +6,9 @@
 #   _ip_state_file     — path to session state file
 #   _ip_read_state     — read state JSON (or default)
 #   _ip_write_state    — write state JSON
+#   _ip_transcript_path   — extract transcript_path from stdin JSON
+#   _ip_transcript_tokens — real transcript context tokens + model (bounded tail read)
+#   _ip_absolute_band     — band index for a real-token count above a threshold
 
 [[ -n "${_LIB_INTERPULSE_LOADED:-}" ]] && return 0
 _LIB_INTERPULSE_LOADED=1
@@ -78,4 +81,101 @@ _ip_max_level() {
   case "$a" in yellow) _ip_na=1;; orange) _ip_na=2;; red) _ip_na=3;; esac
   case "$b" in yellow) _ip_nb=1;; orange) _ip_nb=2;; red) _ip_nb=3;; esac
   if [[ $_ip_na -ge $_ip_nb ]]; then echo "$a"; else echo "$b"; fi
+}
+
+# Extract transcript_path from hook stdin JSON. Empty if absent.
+_ip_transcript_path() {
+  echo "$1" | jq -r '.transcript_path // empty' 2>/dev/null
+}
+
+# Real (provider-reported) transcript context, read from a bounded tail of
+# the transcript file rather than the whole thing (transcripts can run to
+# many MB). Ported from Clavain hooks/context-handoff.sh: the last
+# main-chain (isSidechain=false, type=assistant, message.model !=
+# "<synthetic>") record's
+# input_tokens + cache_creation_input_tokens + cache_read_input_tokens is
+# the measure, because that is what the model actually saw on its last
+# turn -- not a heuristic estimate. Synthetic records are Claude Code's own
+# zero-usage markers for turns that ended on a 429/weekly-limit/OAuth-expiry
+# error; they are excluded here to match scripts/burn-report.py:83's skip
+# (`model == "<synthetic>"`) -- otherwise a coordinator whose last turn hit
+# one of these measures as 0 tokens and this hook goes silent right when a
+# high-burn coordinator is most likely to need the handoff nudge.
+#
+# Prints "<tokens> <model>" on stdout, tokens defaulting to 0 and model to
+# "unknown" if no usable record is found (missing file, no jq, malformed
+# transcript, only sidechain records, etc). Never fails the caller: on any
+# error this still prints "0 unknown" so callers can test
+# `[[ "$tokens" =~ ^[0-9]+$ ]]` uniformly instead of branching on a second
+# failure mode. Callers that must distinguish "measured zero" from
+# "couldn't measure" should treat missing/unreadable transcript_path as a
+# distinct precondition before calling this (as both interpulse hooks do).
+_ip_transcript_tokens() {
+  local transcript="$1"
+  local tail_bytes="${2:-262144}"
+  local tokens=0 model="unknown" result
+
+  [[ -n "$transcript" && -f "$transcript" ]] || { printf '%s %s\n' "$tokens" "$model"; return 0; }
+  command -v jq >/dev/null 2>&1 || { printf '%s %s\n' "$tokens" "$model"; return 0; }
+
+  # The bounded tail may begin mid-record: drop that partial first line,
+  # but only when the file is actually larger than the tail. Any other line
+  # that does not parse (an incomplete trailing record, corruption) means the
+  # measurement is unreliable, so report "0 unknown" and let callers stay
+  # silent rather than act on older usage.
+  local size data
+  size="$(wc -c <"$transcript" 2>/dev/null | tr -d ' ')" || size=0
+  data="$(tail -c "$tail_bytes" "$transcript" 2>/dev/null)" || data=""
+  # Only when the cut really fell inside a record: if the byte just before
+  # the tail is a newline, the first tail line is complete and is kept.
+  if [[ "$size" =~ ^[0-9]+$ ]] && (( size > tail_bytes )); then
+    local prev
+    prev="$(tail -c "$((tail_bytes + 1))" "$transcript" 2>/dev/null | head -c 1 | od -An -tx1 | tr -d ' \n')"
+    if [[ "$prev" != "0a" ]]; then
+      data="$(printf '%s\n' "$data" | tail -n +2)"
+    fi
+  fi
+
+  result="$(printf '%s\n' "$data" | jq -R -n -r '
+      [inputs | select(length > 0)
+       | (try fromjson catch "BAD")] as $recs
+      | if any($recs[]; . == "BAD") then empty
+        else
+          [$recs[]
+           | select(type == "object"
+                    and .type == "assistant"
+                    and ((.isSidechain // false) == false)
+                    and (.message.usage != null)
+                    and (.message.model != "<synthetic>"))
+           | ((.message.usage.input_tokens // 0)
+              + (.message.usage.cache_creation_input_tokens // 0)
+              + (.message.usage.cache_read_input_tokens // 0)) as $t
+           | "\($t) \(.message.model // "unknown")"]
+          | last // empty
+        end
+  ' 2>/dev/null)"
+
+  if [[ -n "$result" ]]; then
+    local t="${result%% *}"
+    if [[ "$t" =~ ^[0-9]+$ ]]; then
+      tokens="$t"
+      model="${result#* }"
+    fi
+  fi
+  printf '%s %s\n' "$tokens" "$model"
+}
+
+# Band index for a real-token count above a fixed absolute threshold,
+# matching Clavain's context-handoff.sh band semantics: one band per 25k
+# tokens, counted from zero regardless of where the threshold sits (so
+# 100000/125000/150000 are bands 4/5/6). Prints empty (not 0) when tokens
+# are below the threshold or not numeric, so callers can distinguish
+# "below threshold" from "band 0" with a single string-emptiness check.
+_ip_absolute_band() {
+  local tokens="$1" threshold="${2:-100000}" band_size="${3:-25000}"
+  [[ "$tokens" =~ ^[0-9]+$ ]] || return 0
+  [[ "$threshold" =~ ^[0-9]+$ ]] || return 0
+  [[ "$band_size" =~ ^[0-9]+$ ]] || band_size=25000
+  (( tokens < threshold )) && return 0
+  echo $(( tokens / band_size ))
 }
