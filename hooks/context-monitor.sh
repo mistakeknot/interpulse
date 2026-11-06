@@ -99,10 +99,10 @@ if [[ "$ABS_CROSSED" == true ]]; then
       # its "Permission denied" straight to the real stderr before
       # `2>/dev/null` ever takes effect.
       { printf '%s' "$ABS_BAND" > "$ABS_BAND_FILE"; } 2>/dev/null || true
-      ABS_NOTE="Real transcript context is ~${REAL_TOKENS} tokens, past the absolute handoff threshold of ${ABS_THRESHOLD} (independent of context-window percentage). Coordinator threads: run bb handoff --self --to <provider> --model <model> --replace, or bb handoff coordinator enable --self --rotate-at ${ABS_THRESHOLD}."
+      ABS_NOTE="Real transcript context is ~${REAL_TOKENS} tokens, past the absolute handoff threshold of ${ABS_THRESHOLD} (independent of context-window percentage). Coordinator threads: run bb handoff coordinator enable --self --rotate-at N, with N at least ${ABS_THRESHOLD} and at least 2x the seedTokens shown by bb handoff coordinator status --self --json (bb declines a lower value); bb then rotates the thread on idle."
     fi
   else
-    ABS_NOTE="Real transcript context is ~${REAL_TOKENS} tokens, past the absolute handoff threshold of ${ABS_THRESHOLD} (independent of context-window percentage). Coordinator threads: run bb handoff --self --to <provider> --model <model> --replace, or bb handoff coordinator enable --self --rotate-at ${ABS_THRESHOLD}."
+    ABS_NOTE="Real transcript context is ~${REAL_TOKENS} tokens, past the absolute handoff threshold of ${ABS_THRESHOLD} (independent of context-window percentage). Coordinator threads: run bb handoff coordinator enable --self --rotate-at N, with N at least ${ABS_THRESHOLD} and at least 2x the seedTokens shown by bb handoff coordinator status --self --json (bb declines a lower value); bb then rotates the thread on idle."
   fi
 elif [[ -n "$ABS_BAND_FILE" ]]; then
   # P2-2: below threshold -- clear any stale band marker so climbing back

@@ -335,7 +335,11 @@ if [[ "$IS_COORDINATOR" == "true" ]]; then
     fi
 
     # Never advise the vizier thread: it rotates by idle on its own.
-    TITLE="$("${TIMEOUT_CMD[@]}" bb thread show "$BB_THREAD_ID" --json 2>/dev/null | jq -r '.thread.title // empty' 2>/dev/null)" || TITLE=""
+    # A failed or malformed title lookup is undetermined: exit WITHOUT
+    # persisting the band so the next Stop retries (never block the vizier on
+    # a hiccup, never consume the band).
+    TITLE_JSON="$("${TIMEOUT_CMD[@]}" bb thread show "$BB_THREAD_ID" --json 2>/dev/null)" || exit 0
+    TITLE="$(jq -r '.thread.title // empty' <<<"$TITLE_JSON" 2>/dev/null)" || exit 0
     case "$TITLE" in
         "Masaq' | vizier"*) _persist_band; exit 0 ;;
     esac
@@ -375,7 +379,7 @@ if [[ "$IS_COORDINATOR" == "true" ]]; then
         exit 0
     fi
 
-    REASON="Context handoff: this coordinator thread is at ~${CONTEXT_TOKENS} tokens of context (threshold ${THRESHOLD}). Run: bb handoff coordinator enable --self --rotate-at ${TARGET}. The value must be at least 2x the thread's seed (${SEED} tokens) or bb declines to rotate; bb then rotates the thread on idle. Do not run bb handoff --replace."
+    REASON="Context handoff: this coordinator thread is at ~${CONTEXT_TOKENS} tokens of context (threshold ${THRESHOLD}). Run: bb handoff coordinator enable --self --rotate-at ${TARGET}. The value must be at least 2x the thread's seed (${SEED} tokens) or bb declines to rotate; bb then rotates the thread on idle."
     _persist_band
     jq -n --arg reason "$REASON" '{"decision":"block","reason":$reason}'
     exit 0

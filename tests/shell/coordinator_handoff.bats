@@ -30,13 +30,6 @@ setup() {
     unset INTERPULSE_COORD_HOOK
     unset INTERPULSE_COORD_CONTEXT_TOKENS
     unset INTERPULSE_COORD_TIME_BUDGET_S
-    # Keep find_clavain_coordinator_model()'s fallback lookup hermetic: point
-    # it at locations that do not exist rather than this host's real
-    # ~/.claude/plugins files, so these tests never depend on what happens to
-    # be installed on the machine running them.
-    export CLAVAIN_INSTALLED_FILE="$STATE_DIR/no-such-installed_plugins.json"
-    export CLAUDE_PLUGIN_CACHE_ROOT="$STATE_DIR/no-such-cache"
-
 }
 
 teardown() {
@@ -66,6 +59,10 @@ fi
 if [[ "\$1 \$2" == "thread context" ]]; then
     printf '%s\n' '$context_json'
     exit ${context_exit_code}
+fi
+if [[ "\$1 \$2" == "thread show" ]]; then
+    jq -nc --arg t "\${STUB_TITLE:-coord}" '{thread:{title:\$t}}'
+    exit \${STUB_SHOW_EXIT:-0}
 fi
 exit 1
 EOF
@@ -267,6 +264,10 @@ if [[ "\$1 \$2" == "thread context" ]]; then
     printf '%s\n' '{"usage":{"modelContextWindow":200000}}'
     exit 0
 fi
+if [[ "\$1 \$2" == "thread show" ]]; then
+    jq -nc --arg t "\${STUB_TITLE:-coord}" '{thread:{title:\$t}}'
+    exit \${STUB_SHOW_EXIT:-0}
+fi
 exit 1
 EOF
     chmod +x "$STUB_DIR/bb"
@@ -299,6 +300,10 @@ if [[ "\$1 \$2" == "thread list" ]]; then
 fi
 if [[ "\$1 \$2" == "thread context" ]]; then
     exit 1
+fi
+if [[ "\$1 \$2" == "thread show" ]]; then
+    jq -nc --arg t "\${STUB_TITLE:-coord}" '{thread:{title:\$t}}'
+    exit \${STUB_SHOW_EXIT:-0}
 fi
 exit 1
 EOF
@@ -523,8 +528,8 @@ EOF
     # lookup fails -> the hook goes silent by design, per the "a bb timeout
     # is silent" test above) rather than the runtime-budget path this test
     # means to cover. This scenario forces all three external calls in one
-    # Stop: status (fractional rotateAt forces a context-window lookup) and
-    # the model resolver.
+    # Stop: status (fractional rotateAt forces a context-window lookup), the
+    # context window, and the title lookup.
     cat > "$STUB_DIR/bb" <<EOF
 #!/usr/bin/env bash
 echo "\$*" >> "$STATE_DIR/bb-calls"
@@ -541,6 +546,10 @@ if [[ "\$1 \$2" == "thread context" ]]; then
     sleep 0.8
     printf '%s\n' '{"usage":{"modelContextWindow":200000}}'
     exit 0
+fi
+if [[ "\$1 \$2" == "thread show" ]]; then
+    jq -nc --arg t "\${STUB_TITLE:-coord}" '{thread:{title:\$t}}'
+    exit \${STUB_SHOW_EXIT:-0}
 fi
 exit 1
 EOF
@@ -565,7 +574,7 @@ EOF
     [ "$(jq -r '.decision' <<<"$output")" = "block" ]
     reason="$(jq -r '.reason' <<<"$output")"
     [[ "$reason" == *"bb handoff coordinator enable --self --rotate-at 90000"* ]]
-    [[ "$reason" != *"--replace "* ]]
+    [[ "$reason" != *"--replace"* ]]
     [[ "$reason" != *"--model"* ]]
     [[ "$reason" != *"claude-sonnet"* ]]
 }
@@ -577,7 +586,7 @@ EOF
     [ "$(jq -r '.decision' <<<"$output")" = "block" ]
     reason="$(jq -r '.reason' <<<"$output")"
     [[ "$reason" == *"enable --self --rotate-at 110438"* ]]
-    [[ "$reason" != *"--replace "* ]]
+    [[ "$reason" != *"--replace"* ]]
 }
 
 @test "coordinator-handoff: rotate-at below 2x the seed is not trusted even when under the threshold" {
@@ -602,14 +611,12 @@ EOF
     [ "$(jq -r 'has("decision")' <<<"$output")" = "false" ]
     msg="$(jq -r '.systemMessage' <<<"$output")"
     [[ "$msg" == *"not-idle"* ]]
-    [[ "$msg" != *"--replace "* ]]
+    [[ "$msg" != *"--replace"* ]]
 }
 
 @test "coordinator-handoff: the vizier thread is never advised" {
     make_bb_stub '{"marking":{"seedTokens":55000},"rotationEnabled":false}'
-    cat >> "$STUB_DIR/bb" <<'EOF'
-EOF
-    sed -i 's|^exit 1$|if [[ "$1 $2" == "thread show" ]]; then printf "%s\\n" "{\\"thread\\":{\\"title\\":\\"Masaq'"'"' \| vizier\\"}}"; exit 0; fi\nexit 1|' "$STUB_DIR/bb"
+    export STUB_TITLE="Masaq' | vizier"
     run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-vizier")"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
@@ -632,6 +639,10 @@ if [[ "\$1 \$2 \$3" == "handoff coordinator status" ]]; then
     fi
     exit 0
 fi
+if [[ "\$1 \$2" == "thread show" ]]; then
+    jq -nc --arg t "\${STUB_TITLE:-coord}" '{thread:{title:\$t}}'
+    exit \${STUB_SHOW_EXIT:-0}
+fi
 exit 1
 EOF
     chmod +x "$STUB_DIR/bb"
@@ -644,4 +655,16 @@ EOF
     [ "$status" -eq 0 ]
     [ "$(jq -r 'has("decision")' <<<"$output")" = "false" ]
     [[ "$(jq -r '.systemMessage' <<<"$output")" == *"no manual handoff"* ]]
+}
+
+@test "coordinator-handoff: a failed title lookup is silent, keeps the band unconsumed, and the next Stop retries" {
+    make_bb_stub '{"marking":{"seedTokens":55000},"rotationEnabled":false}'
+    export STUB_SHOW_EXIT=1
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-title-fail")"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ -z "$(ls -A "$STATE_DIR" | grep band)" ]
+    unset STUB_SHOW_EXIT
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-title-fail")"
+    [ "$(jq -r '.decision' <<<"$output")" = "block" ]
 }
