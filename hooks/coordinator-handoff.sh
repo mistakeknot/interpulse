@@ -41,47 +41,6 @@
 #                                    rotateAt is treated as NOT satisfying the
 #                                    rotation-ok check (fail toward emitting
 #                                    the directive, never toward silence).
-#   CLAVAIN_COORDINATOR_MODEL_CMD    name/path of the external coordinator
-#                                    model resolver, default
-#                                    "coordinator-model.sh" (resolved via
-#                                    `command -v`). This script is Clavain's
-#                                    scripts/coordinator-model.sh -- it STAYS
-#                                    in Clavain; this hook calls it as an
-#                                    external command and never reimplements
-#                                    its `ic route dispatch --role=coordination`
-#                                    resolution logic. On a real install,
-#                                    "coordinator-model.sh" is usually NOT on
-#                                    PATH (Clavain ships it under
-#                                    scripts/, not bin/), so when this
-#                                    variable is unset and the plain name
-#                                    does not resolve via `command -v`, this
-#                                    hook falls back to locating Clavain's
-#                                    installed plugin root the same way
-#                                    Clavain's own hooks/release-canary-check.sh
-#                                    does (installed_plugins.json's
-#                                    "clavain@<marketplace>" installPath),
-#                                    then interline's scripts/statusline.sh
-#                                    glob over the plugin cache
-#                                    (~/.claude/plugins/cache/*/clavain/*,
-#                                    most recently modified) if that lookup
-#                                    comes up empty -- see
-#                                    find_clavain_coordinator_model() below.
-#                                    Full order: CLAVAIN_COORDINATOR_MODEL_CMD
-#                                    override -> PATH -> installed_plugins.json
-#                                    -> plugin cache -> hardcoded Sonnet.
-#                                    If neither locates a usable script, or
-#                                    the resolver can't be found or fails,
-#                                    this hook falls back to the same
-#                                    hardcoded pair coordinator-model.sh
-#                                    itself would print on failure
-#                                    ("claude-code claude-sonnet-5") -- see
-#                                    resolve_coordinator_model() below. An
-#                                    Opus-class result is never honored for
-#                                    this role, from any path; the resolver's
-#                                    provider/model output is also allowlist-
-#                                    validated (see _ip_valid_provider /
-#                                    _ip_valid_model below) before it is ever
-#                                    used to build a "Run:" command.
 #
 # STATE PERSISTENCE (fail-open-state-drift hardening):
 #
@@ -112,12 +71,6 @@
 #   dir, bad restore, permission change) must not trip the script-wide ERR
 #   trap and silence the hook permanently -- see the PREV_BAND read below.
 #
-#   Model resolution (resolve_coordinator_model) never contributes to this
-#   either: it always returns a usable provider/model pair (falling back to
-#   the hardcoded Sonnet pair rather than failing), so a coordinator already
-#   known to be over threshold is never silenced just because the external
-#   resolver command was missing or crashed.
-#
 #   Nothing beyond the plain band integer is cached across bands. Rotation
 #   state, coordinator/worker status and the live context window are always
 #   re-read fresh from bb the moment a NEW band is reached -- there is no
@@ -133,29 +86,24 @@
 #   for a condition (coordinator over threshold) this hook never actually
 #   re-checked.
 #
-# Rotation trust (Clavain P2-2): bb declines to rotate a thread below ~2x its
-# marking's seedTokens (and on hold/cooldown/generation caps), so
-# "rotationEnabled at or under the threshold" only earns silence for the
-# FIRST 25k-token band above rotate-at. A later Stop still at or past
-# rotate-at plus one band means bb evidently did not rotate, and this hook
-# emits a --replace handoff directive instead of a redundant `coordinator
-# enable`. Nothing here persists that trust beyond the current band's fresh
-# bb read (Clavain P2-3): the "first band" judgment is recomputed from
-# CONTEXT_TOKENS and a freshly re-read ROTATE_EFFECTIVE every single time,
-# never cached.
+# Rotation (bead mk-w6ic8): bb declines to rotate a thread whose rotate-at is
+# below 2x its marking's seedTokens ("threshold-below-seed"), and rotates on
+# idle once context passes a valid rotate-at. So a coordinator's directive is
+# only ever `bb handoff coordinator enable --self --rotate-at N` with N =
+# max(threshold, 2x seed). It never advises `--replace` or a model: on
+# generation-2 coordinators `--replace` exits 1 (legacy-migration-hold), and
+# the coordinator's seat is chosen by bb, not by this hook. A thread already
+# enabled at a valid N earns silence for the FIRST 25k-token band above it;
+# a later Stop still past that gets a non-blocking note (no manual handoff).
+# The vizier thread (title "Masaq' | vizier...") rotates by idle and is never
+# advised. Nothing here persists trust beyond the current band: everything is
+# re-read fresh from bb on each new band.
 #
-# Command order (Clavain P2-1): `enable` is always listed before `--replace`
-# when both are needed -- `--replace` archives the source thread, so a
-# `--self` command issued after it resolves to the archived source, not the
-# successor.
-#
-# Runtime budget (P2-4): each external call (bb, the resolver) is capped at
-# 1s via `timeout`, and an overall elapsed-time check skips the remaining
-# OPTIONAL lookups (the live context-window read, the external resolver)
-# once this Stop has already run for about 6s, falling back to their
-# documented safe defaults ("window unknown" / hardcoded Sonnet) instead.
-# hooks.json's Stop entry timeout is 10s, giving headroom above the ~4s
-# worst case (status + list/context + resolver, each capped at 1s).
+# Runtime budget (P2-4): each external call (bb) is capped at 1s via
+# `timeout`, and an overall elapsed-time check skips the remaining OPTIONAL
+# lookups (the live context-window read) once this Stop has already run for
+# about 6s, falling back to the documented safe default ("window unknown").
+# hooks.json's Stop entry timeout is 10s, giving headroom above the worst case.
 #
 # Coordinator: blocking `{"decision":"block","reason":...}`.
 # Worker: advisory `{"systemMessage":...}`, never a block.
@@ -175,9 +123,9 @@ trap 'exit 0' ERR
 
 HOOK_START_S=$(date +%s)
 # Optional-call time budget (P2-4): once this Stop has run this long,
-# remaining OPTIONAL lookups (the live context-window read, the external
-# resolver) are skipped in favor of their documented safe defaults, instead
-# of risking the hooks.json Stop timeout and losing the whole determination
+# remaining OPTIONAL lookups (the live context-window read) are skipped in
+# favor of their documented safe defaults, instead of risking the hooks.json
+# Stop timeout and losing the whole determination
 # (including a real block) to a slow/hung external process. Overridable only
 # for tests.
 _ip_elapsed_over_budget() {
@@ -206,15 +154,13 @@ command -v jq >/dev/null 2>&1 || exit 0
 # dispatched validation/review child inherits its coordinator PARENT's
 # thread ID. Without this guard, that child's own Stop could resolve (via
 # `bb handoff coordinator status --self`) to the marked PARENT thread and,
-# if the block's "Run: ... --replace" is obeyed, archive the live
+# if its block advised a handoff that archives the live
 # coordinator. The headless check below covers this: a dispatched child is
 # itself a `claude -p` process, so it is caught the same way.
 #
 # This is a self-contained port of Clavain hooks/lib-headless.sh's
 # clavain_is_headless -- deliberately NOT sourced from an installed Clavain
-# (this hook never reimplements or imports Clavain internals beyond calling
-# scripts/coordinator-model.sh as an external command; see the
-# CLAVAIN_COORDINATOR_MODEL_CMD comment above). Walks up to 8 process
+# (this hook never imports Clavain internals).
 # ancestors looking for a `claude` process; if found running as
 # `-p`/`--print`, this session is headless. Fails OPEN (returns 1, "not
 # headless") on any `ps` error, so a detector bug never suppresses the
@@ -283,7 +229,6 @@ BAND_FILE="$STATE_DIR/${SAFE_SID}.band"
 # --- Context measure (shared with context-monitor.sh's absolute tracking) ---
 RESULT="$(_ip_transcript_tokens "$TRANSCRIPT")"
 CONTEXT_TOKENS="${RESULT%% *}"
-MODEL="${RESULT#* }"
 
 [[ "$CONTEXT_TOKENS" =~ ^[0-9]+$ ]] || exit 0
 if (( CONTEXT_TOKENS < THRESHOLD )); then
@@ -318,152 +263,6 @@ _persist_band() {
     { printf '%s' "$band" > "$BAND_FILE"; } 2>/dev/null || true
 }
 
-# Provider must be a bb-recognized backend name; model must look like a
-# real model identifier (no spaces, no shell metacharacters). Anything else
-# from the resolver -- including injection attempts (";", spaces) or an
-# unknown provider -- is rejected before it ever becomes part of a "Run:"
-# command (P3 allowlist hardening; a substring Opus denylist alone lets
-# e.g. "claude-fable-5-1" straight through, and validates nothing about the
-# provider).
-_ip_valid_provider() {
-    case "$1" in
-        claude-code|codex) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-_ip_valid_model() {
-    [[ "$1" =~ ^[a-z0-9][a-z0-9._-]*$ ]]
-}
-
-# Locate an installed Clavain's scripts/coordinator-model.sh when the plain
-# name isn't on PATH. Established pattern, not invented here:
-#   1. installed_plugins.json's "clavain@<marketplace>" installPath -- the
-#      same lookup Clavain's own hooks/release-canary-check.sh does against
-#      that file (installPath existence + a parseable plugin.json).
-#      "clavain@interagency-marketplace" (the canonical marketplace key) is
-#      preferred when present; any other "clavain@*" key is used only if
-#      that exact key is absent.
-#   2. Failing that, the plugin-cache glob interline's scripts/statusline.sh
-#      already uses to find Clavain's version
-#      (~/.claude/plugins/cache/*/clavain/*), taking the most recently
-#      modified match that isn't marked `.orphaned_at` and has a parseable
-#      plugin.json.
-# Overridable for tests via CLAVAIN_INSTALLED_FILE (matches
-# release-canary-check.sh's own override name) and CLAUDE_PLUGIN_CACHE_ROOT
-# (matches scripts/check-install-updates.sh's override name). Prints nothing
-# and returns non-zero if no usable coordinator-model.sh is found.
-find_clavain_coordinator_model() {
-    local installed_file="${CLAVAIN_INSTALLED_FILE:-$HOME/.claude/plugins/installed_plugins.json}"
-    local cache_root="${CLAUDE_PLUGIN_CACHE_ROOT:-$HOME/.claude/plugins/cache}"
-    local root="" candidate
-
-    if command -v jq >/dev/null 2>&1 && [[ -f "$installed_file" ]]; then
-        root="$(jq -r '
-            .plugins // {} | to_entries
-            | (map(select(.key == "clavain@interagency-marketplace"))
-               + map(select(.key | test("^clavain@"))))
-            | .[0].value[0].installPath // empty
-        ' "$installed_file" 2>/dev/null)" || root=""
-        if [[ -n "$root" ]]; then
-            # A usable install has a PARSEABLE plugin.json, not merely an
-            # installPath that exists (a half-written or corrupted install
-            # is not trusted just because the directory is there).
-            jq -e . "$root/.claude-plugin/plugin.json" >/dev/null 2>&1 || root=""
-        fi
-    fi
-
-    if [[ -z "$root" || ! -d "$root" ]]; then
-        root=""
-        local newest_mtime=-1 mtime
-        shopt -s nullglob
-        for candidate in "$cache_root"/*/clavain/*; do
-            [[ -d "$candidate" ]] || continue
-            [[ -e "$candidate/.orphaned_at" ]] && continue
-            jq -e . "$candidate/.claude-plugin/plugin.json" >/dev/null 2>&1 || continue
-            mtime="$(stat -c %Y "$candidate" 2>/dev/null || stat -f %m "$candidate" 2>/dev/null || echo -1)"
-            [[ "$mtime" =~ ^-?[0-9]+$ ]] || mtime=-1
-            if (( mtime > newest_mtime )); then
-                newest_mtime="$mtime"
-                root="$candidate"
-            fi
-        done
-        shopt -u nullglob
-    fi
-
-    [[ -n "$root" && -f "$root/scripts/coordinator-model.sh" ]] || return 1
-    printf '%s\n' "$root/scripts/coordinator-model.sh"
-}
-
-# Resolve the coordinator model by calling Clavain's scripts/coordinator-model.sh
-# as an external command -- never reimplemented here. Always returns a usable
-# "<provider> <model>" pair; never leaves the caller without one, and never
-# an Opus-class model.
-resolve_coordinator_model() {
-    local cmd="" resolved="" provider model
-
-    # P2-4: this call is OPTIONAL (a hardcoded Sonnet fallback always covers
-    # it) -- past the time budget, skip straight to that fallback rather
-    # than risk the search/invocation pushing this Stop past its hooks.json
-    # timeout.
-    if _ip_elapsed_over_budget; then
-        printf '%s %s\n' "claude-code" "claude-sonnet-5"
-        return 0
-    fi
-
-    cmd="${CLAVAIN_COORDINATOR_MODEL_CMD:-}"
-    if [[ -z "$cmd" ]]; then
-        cmd="coordinator-model.sh"
-        if ! command -v "$cmd" >/dev/null 2>&1; then
-            local found=""
-            found="$(find_clavain_coordinator_model)" || found=""
-            [[ -n "$found" ]] && cmd="$found"
-        fi
-    fi
-
-    if command -v "$cmd" >/dev/null 2>&1; then
-        # Hard bound: SIGKILL follows SIGTERM after 0.2s. Without timeout the
-        # resolver is not run and the documented fallback pair is used.
-        if command -v timeout >/dev/null 2>&1; then
-            resolved="$(timeout -k 0.2 1 "$cmd" 2>/dev/null)" || resolved=""
-        fi
-    fi
-
-    provider="${resolved%% *}"
-    model="${resolved#* }"
-    if [[ -z "$resolved" || "$provider" == "$resolved" || -z "$provider" || -z "$model" ]] \
-        || ! _ip_valid_provider "$provider" || ! _ip_valid_model "$model"; then
-        # coordinator-model.sh not on PATH, it failed/produced unusable
-        # output, or its output didn't pass the provider/model allowlist
-        # (P3 -- catches injection attempts and unknown providers, not just
-        # Opus): fail soft to the exact fallback pair it documents for its
-        # own error paths. This never blocks a directive on the resolver
-        # being unavailable or untrustworthy.
-        provider="claude-code"
-        model="claude-sonnet-5"
-    fi
-
-    # Defense in depth: this role never runs Opus, regardless of what a
-    # broken or misconfigured external resolver printed. coordinator-model.sh
-    # already refuses Opus internally; this is a second, independent check
-    # against forwarding one anyway. (The allowlist above does not catch
-    # this alone: "claude-opus-5-5" matches the model charset.)
-    case "${model,,}" in
-        *opus*) provider="claude-code"; model="claude-sonnet-5" ;;
-    esac
-
-    printf '%s %s\n' "$provider" "$model"
-}
-
-# Strip a trailing dated-snapshot suffix (-YYYYMMDD) before comparing model
-# strings (P3): a transcript that records a dated snapshot ID would
-# otherwise never equal the resolver's undated alias, so every band would
-# emit a spurious --replace even when the coordinator is already on the
-# right model family.
-_ip_strip_dated_suffix() {
-    local m="$1"
-    [[ "$m" =~ ^(.*)-[0-9]{8}$ ]] && m="${BASH_REMATCH[1]}"
-    printf '%s' "$m"
-}
 
 # --- Who counts as a coordinator (bb consulted fresh, once per band) ---
 # Every bb-lookup failure below exits WITHOUT calling _persist_band, so the
@@ -535,72 +334,54 @@ if [[ "$IS_COORDINATOR" == "true" ]]; then
         [[ "$ROTATE_EFFECTIVE" =~ ^-?[0-9]+$ ]] || ROTATE_EFFECTIVE=-1
     fi
 
-    read -r RESOLVED_PROVIDER RESOLVED_MODEL < <(resolve_coordinator_model)
+    # Never advise the vizier thread: it rotates by idle on its own.
+    TITLE="$("${TIMEOUT_CMD[@]}" bb thread show "$BB_THREAD_ID" --json 2>/dev/null | jq -r '.thread.title // empty' 2>/dev/null)" || TITLE=""
+    case "$TITLE" in
+        "Masaq' | vizier"*) _persist_band; exit 0 ;;
+    esac
 
-    # Rotation is "configured" once bb reports it enabled at or under this
-    # hook's own threshold. Configured alone isn't trusted: bb can decline to
-    # actually rotate (seed guard, hold, cooldown, generation cap). Silence
-    # is earned only in the FIRST band above rotate-at (freshly computed
-    # every time -- nothing here is cached beyond this Stop's own read).
+    # bb declines to rotate a thread whose rotate-at is below 2x its seed
+    # ("threshold-below-seed"), and rotates on idle once context passes a valid
+    # rotate-at. So the advice is only ever to (re)enable at a value that is
+    # at least 2x the seed and at least this hook's own threshold. There is no
+    # manual --replace handoff and no model advice here.
+    SEED=0
+    SEED_RAW="$(jq -r '.marking.seedTokens // empty' <<<"$STATUS_JSON" 2>/dev/null)" || SEED_RAW=""
+    [[ "$SEED_RAW" =~ ^[0-9]+$ ]] && SEED="$SEED_RAW"
+    DECLINE="$(jq -r '.lastDeclineReason // empty' <<<"$STATUS_JSON" 2>/dev/null)" || DECLINE=""
+    MIN_ROTATE=$(( SEED * 2 ))
+    TARGET="$THRESHOLD"
+    (( MIN_ROTATE > TARGET )) && TARGET="$MIN_ROTATE"
+
+    # Configured: enabled at a value bb will honor (>= 2x seed) and no higher
+    # than the target, so rotation fires once context passes it.
     ROTATION_CONFIGURED="false"
-    if [[ "$ROTATION_ENABLED" == "true" && "$ROTATE_EFFECTIVE" -ge 0 && "$ROTATE_EFFECTIVE" -le "$THRESHOLD" ]]; then
+    if [[ "$ROTATION_ENABLED" == "true" && "$ROTATE_EFFECTIVE" -ge 0 \
+          && "$ROTATE_EFFECTIVE" -ge "$MIN_ROTATE" && "$ROTATE_EFFECTIVE" -le "$TARGET" ]]; then
         ROTATION_CONFIGURED="true"
     fi
 
-    ROTATION_OK="false"
-    ROTATION_STUCK="false"
     if [[ "$ROTATION_CONFIGURED" == "true" ]]; then
-        TOKENS_SINCE_ROTATE=$(( CONTEXT_TOKENS - ROTATE_EFFECTIVE ))
-        if (( TOKENS_SINCE_ROTATE < 25000 )); then
-            ROTATION_OK="true"
-        else
-            ROTATION_STUCK="true"
+        # Trusted for the first 25k-token band above rotate-at; a later Stop
+        # still past that means bb evidently has not rotated (not idle yet,
+        # hold, cooldown, generation cap).
+        if (( CONTEXT_TOKENS - ROTATE_EFFECTIVE < 25000 )); then
+            _persist_band
+            exit 0
         fi
-    fi
-
-    MODEL_OK="false"
-    [[ "$(_ip_strip_dated_suffix "$MODEL")" == "$(_ip_strip_dated_suffix "$RESOLVED_MODEL")" ]] && MODEL_OK="true"
-
-    if [[ "$ROTATION_OK" == "true" && "$MODEL_OK" == "true" ]]; then
+        REASON="Context handoff (advisory): this coordinator is at ~${CONTEXT_TOKENS} tokens and rotation is enabled at ${ROTATE_EFFECTIVE}, but bb has not rotated it${DECLINE:+ (last decline: ${DECLINE})}. bb rotates a coordinator when it is idle; no manual handoff is needed."
         _persist_band
+        jq -n --arg msg "$REASON" '{"systemMessage":$msg}'
         exit 0
     fi
 
-    # `enable` (if needed) always comes before `--replace` (if needed):
-    # `--replace` archives the source, so a `--self` command issued after it
-    # resolves to the archived source, not the successor (Clavain P2-1).
-    NEED_ENABLE="false"
-    NEED_REPLACE="false"
-    if [[ "$ROTATION_OK" != "true" ]]; then
-        if [[ "$ROTATION_STUCK" == "true" ]]; then
-            # Already enabled correctly but bb didn't rotate: re-issuing the
-            # same `enable` is redundant. Force the handoff instead.
-            NEED_REPLACE="true"
-        else
-            # Always follow `enable` with the ready `--replace` command so
-            # the directive is complete in one pass.
-            NEED_ENABLE="true"
-            NEED_REPLACE="true"
-        fi
-    else
-        [[ "$MODEL_OK" != "true" ]] && NEED_REPLACE="true"
-    fi
-
-    CMDS=""
-    if [[ "$NEED_ENABLE" == "true" ]]; then
-        CMDS="${CMDS}"$'\n'"  bb handoff coordinator enable --self --rotate-at ${THRESHOLD}"
-    fi
-    if [[ "$NEED_REPLACE" == "true" ]]; then
-        CMDS="${CMDS}"$'\n'"  bb handoff --self --to ${RESOLVED_PROVIDER} --model ${RESOLVED_MODEL} --replace"
-    fi
-
-    REASON="Context handoff: this coordinator thread is at ~${CONTEXT_TOKENS} tokens of context (threshold ${THRESHOLD}). Run:${CMDS}"
+    REASON="Context handoff: this coordinator thread is at ~${CONTEXT_TOKENS} tokens of context (threshold ${THRESHOLD}). Run: bb handoff coordinator enable --self --rotate-at ${TARGET}. The value must be at least 2x the thread's seed (${SEED} tokens) or bb declines to rotate; bb then rotates the thread on idle. Do not run bb handoff --replace."
     _persist_band
     jq -n --arg reason "$REASON" '{"decision":"block","reason":$reason}'
     exit 0
 fi
 
-REASON="Context handoff (advisory): this thread is at ~${CONTEXT_TOKENS} tokens of context (threshold ${THRESHOLD}). Consider handing off, e.g. bb handoff --self --to <provider> --model <model> --replace"
+REASON="Context handoff (advisory): this thread is at ~${CONTEXT_TOKENS} tokens of context (threshold ${THRESHOLD}). Consider wrapping up or handing the remaining work to a fresh thread."
 _persist_band
 jq -n --arg msg "$REASON" '{"systemMessage":$msg}'
 exit 0
