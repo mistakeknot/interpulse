@@ -23,7 +23,8 @@
 # genuinely large coordinator burn (e.g. 150k real tokens) is still only
 # ~15% used and never reaches even Yellow. hooks/coordinator-handoff.sh (the
 # Stop hook) makes its blocking/advisory decision on a fixed ABSOLUTE token
-# count instead (default 100000, see INTERPULSE_COORD_CONTEXT_TOKENS). This
+# count instead (default INTERPULSE_COORD_CONTEXT_DEFAULT in lib/interpulse-lib.sh, overridable
+# with INTERPULSE_COORD_CONTEXT_TOKENS). This
 # monitor now ALSO measures that same absolute number from the transcript
 # (via lib/interpulse-lib.sh's _ip_transcript_tokens, the identical function
 # the Stop hook uses, so both mechanisms agree on the same figure) and
@@ -53,8 +54,8 @@ TRANSCRIPT_PATH=$(_ip_transcript_path "$INPUT")
 REAL_RESULT="$(_ip_transcript_tokens "$TRANSCRIPT_PATH")"
 REAL_TOKENS="${REAL_RESULT%% *}"
 [[ "$REAL_TOKENS" =~ ^[0-9]+$ ]] || REAL_TOKENS=0
-ABS_THRESHOLD="${INTERPULSE_COORD_CONTEXT_TOKENS:-100000}"
-[[ "$ABS_THRESHOLD" =~ ^[0-9]+$ ]] || ABS_THRESHOLD=100000
+ABS_THRESHOLD="${INTERPULSE_COORD_CONTEXT_TOKENS:-$INTERPULSE_COORD_CONTEXT_DEFAULT}"
+[[ "$ABS_THRESHOLD" =~ ^[0-9]+$ ]] || ABS_THRESHOLD="$INTERPULSE_COORD_CONTEXT_DEFAULT"
 ABS_BAND="$(_ip_absolute_band "$REAL_TOKENS" "$ABS_THRESHOLD")"
 ABS_CROSSED=false
 [[ -n "$ABS_BAND" ]] && ABS_CROSSED=true
@@ -79,7 +80,7 @@ fi
 
 # Report at most once per 25k-token band past the threshold, same as the
 # Stop hook's band throttle, so this doesn't re-warn on every single tool
-# call once past 100k.
+# call once past the threshold.
 ABS_NOTE=""
 if [[ "$ABS_CROSSED" == true ]]; then
   if [[ -n "$ABS_BAND_FILE" ]]; then

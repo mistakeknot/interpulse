@@ -8,7 +8,7 @@ bats_require_minimum_version 1.5.0
 #   - measures the same real transcript tokens the Stop hook
 #     (hooks/coordinator-handoff.sh) uses, via the same lib function;
 #   - reports once per 25k-token band past INTERPULSE_COORD_CONTEXT_TOKENS
-#     (default 100000), as an additionalContext note;
+#     (default 90000), as an additionalContext note;
 #   - fires even when the heuristic level is green (the whole point: a 1M
 #     window session can have a huge absolute token count while still
 #     "green" on the percentage-based signal).
@@ -72,7 +72,7 @@ hook_input_big_output() {  # $1 = transcript path, $2 = tool_output file
     [ -n "$output" ]
     msg="$(jq -r '.additionalContext' <<<"$output")"
     [[ "$msg" == *"130000"* ]]
-    [[ "$msg" == *"100000"* ]]
+    [[ "$msg" == *"90000"* ]]
 }
 
 @test "context-monitor abs: a second call in the same band is silent (band-gated, not per-call)" {

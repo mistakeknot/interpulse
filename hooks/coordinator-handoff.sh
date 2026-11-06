@@ -18,7 +18,7 @@
 # excluded so a turn that ends on one of those doesn't measure as 0 and go
 # silent.
 #
-# This is an ABSOLUTE threshold (default 100000 tokens), not a percentage of
+# This is an ABSOLUTE threshold (default 90000 tokens, INTERPULSE_COORD_CONTEXT_DEFAULT), not a percentage of
 # the model's context window: context-monitor.sh's existing heuristic
 # Yellow/Orange/Red bands are a percentage of window size and fire far too
 # late on 1M-context models (100k tokens is 10% there, not the "context
@@ -26,7 +26,8 @@
 # context-monitor.sh extension deliberately do not scale with window size.
 #
 # Settings:
-#   INTERPULSE_COORD_CONTEXT_TOKENS  threshold, default 100000
+#   INTERPULSE_COORD_CONTEXT_TOKENS  threshold, default INTERPULSE_COORD_CONTEXT_DEFAULT
+#                                    (90000, set in lib/interpulse-lib.sh)
 #   INTERPULSE_COORD_HOOK=off        disables the hook entirely
 #   INTERPULSE_COORD_STATE_DIR       per-session band-throttle dir (default
 #                                    ~/.interpulse/coordinator-handoff)
@@ -270,7 +271,7 @@ if [[ -z "$SESSION_ID" ]]; then
     [[ -n "$SESSION_ID" && "$SESSION_ID" != "unknown-" ]] || SESSION_ID="unknown"
 fi
 
-THRESHOLD="${INTERPULSE_COORD_CONTEXT_TOKENS:-100000}"
+THRESHOLD="${INTERPULSE_COORD_CONTEXT_TOKENS:-$INTERPULSE_COORD_CONTEXT_DEFAULT}"
 [[ "$THRESHOLD" =~ ^[0-9]+$ ]] || exit 0
 
 STATE_DIR="${INTERPULSE_COORD_STATE_DIR:-$HOME/.interpulse/coordinator-handoff}"
