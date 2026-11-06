@@ -9,6 +9,7 @@
 #   _ip_transcript_path   — extract transcript_path from stdin JSON
 #   _ip_transcript_tokens — real transcript context tokens + model (bounded tail read)
 #   _ip_absolute_band     — band index for a real-token count above a threshold
+#   INTERPULSE_COORD_CONTEXT_DEFAULT — default absolute handoff threshold (tokens)
 
 [[ -n "${_LIB_INTERPULSE_LOADED:-}" ]] && return 0
 _LIB_INTERPULSE_LOADED=1
@@ -165,14 +166,22 @@ _ip_transcript_tokens() {
   printf '%s %s\n' "$tokens" "$model"
 }
 
+# Default absolute real-context threshold, in tokens, for the coordinator
+# handoff Stop hook and context-monitor.sh's absolute report. Both read it from
+# here, so this is the one place to tune it; INTERPULSE_COORD_CONTEXT_TOKENS
+# still overrides it per session. 90000 rather than 100000: coordinators that
+# rotated past 100k drove the burn spikes this hook exists to stop (bead
+# mk-42j9.13).
+INTERPULSE_COORD_CONTEXT_DEFAULT=90000
+
 # Band index for a real-token count above a fixed absolute threshold,
 # matching Clavain's context-handoff.sh band semantics: one band per 25k
 # tokens, counted from zero regardless of where the threshold sits (so
-# 100000/125000/150000 are bands 4/5/6). Prints empty (not 0) when tokens
+# 90000/100000/125000 are bands 3/4/5). Prints empty (not 0) when tokens
 # are below the threshold or not numeric, so callers can distinguish
 # "below threshold" from "band 0" with a single string-emptiness check.
 _ip_absolute_band() {
-  local tokens="$1" threshold="${2:-100000}" band_size="${3:-25000}"
+  local tokens="$1" threshold="${2:-$INTERPULSE_COORD_CONTEXT_DEFAULT}" band_size="${3:-25000}"
   [[ "$tokens" =~ ^[0-9]+$ ]] || return 0
   [[ "$threshold" =~ ^[0-9]+$ ]] || return 0
   [[ "$band_size" =~ ^[0-9]+$ ]] || band_size=25000

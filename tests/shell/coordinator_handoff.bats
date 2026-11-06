@@ -6,7 +6,7 @@ bats_require_minimum_version 1.5.0
 # The hook is a Stop hook. It measures REAL transcript context from the last
 # main-chain assistant record (via lib/interpulse-lib.sh's
 # _ip_transcript_tokens), and for bb sessions above
-# INTERPULSE_COORD_CONTEXT_TOKENS (default 100000):
+# INTERPULSE_COORD_CONTEXT_TOKENS (default 90000, INTERPULSE_COORD_CONTEXT_DEFAULT):
 #   - a coordinator thread gets a blocking decision naming the exact
 #     `bb handoff` commands, unless rotation is already enabled at or under
 #     the threshold AND still within the first 25k-token band since
@@ -109,7 +109,7 @@ hook_input() {  # $1 = transcript path, $2 = stop_hook_active (true/false), $3 =
     [ -z "$output" ]
 }
 
-@test "coordinator-handoff: coordinator above threshold on Opus blocks with enable before replace, naming sonnet and 100000" {
+@test "coordinator-handoff: coordinator above threshold on Opus blocks with enable before replace, naming sonnet and 90000" {
     make_bb_stub '{"marking":{},"rotationEnabled":false}'
     run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-block")"
     [ "$status" -eq 0 ]
@@ -117,12 +117,29 @@ hook_input() {  # $1 = transcript path, $2 = stop_hook_active (true/false), $3 =
     reason="$(jq -r '.reason' <<<"$output")"
     [ "$decision" = "block" ]
     [[ "$reason" == *"claude-sonnet-5"* ]]
-    [[ "$reason" == *"100000"* ]]
+    [[ "$reason" == *"90000"* ]]
     [[ "$reason" == *"bb handoff --self --to claude-code --model claude-sonnet-5 --replace"* ]]
-    [[ "$reason" == *"bb handoff coordinator enable --self --rotate-at 100000"* ]]
+    [[ "$reason" == *"bb handoff coordinator enable --self --rotate-at 90000"* ]]
     # enable must be listed before --replace: --replace archives the source
     # thread, so a --self command after it would resolve to the archive.
-    [[ "$reason" == *"bb handoff coordinator enable --self --rotate-at 100000"*"bb handoff --self --to claude-code --model claude-sonnet-5 --replace"* ]]
+    [[ "$reason" == *"bb handoff coordinator enable --self --rotate-at 90000"*"bb handoff --self --to claude-code --model claude-sonnet-5 --replace"* ]]
+}
+
+@test "coordinator-handoff: default threshold is the 90000 named constant, so a 95k coordinator blocks" {
+    grep -qx 'INTERPULSE_COORD_CONTEXT_DEFAULT=90000' "$BATS_TEST_DIRNAME/../../lib/interpulse-lib.sh"
+    make_bb_stub '{"marking":{},"rotationEnabled":false}'
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/95k-sonnet.jsonl" false "sess-95k")"
+    [ "$status" -eq 0 ]
+    [ "$(jq -r '.decision' <<<"$output")" = "block" ]
+    [[ "$(jq -r '.reason' <<<"$output")" == *"bb handoff coordinator enable --self --rotate-at 90000"* ]]
+}
+
+@test "coordinator-handoff: INTERPULSE_COORD_CONTEXT_TOKENS still overrides the default (95k under a 100000 override is silent)" {
+    make_bb_stub '{"marking":{},"rotationEnabled":false}'
+    export INTERPULSE_COORD_CONTEXT_TOKENS=100000
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/95k-sonnet.jsonl" false "sess-95k-override")"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
 }
 
 @test "coordinator-handoff: rotation enabled just past rotate-at (first band) stays silent" {
@@ -791,5 +808,5 @@ EOF
     run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-sonnet.jsonl" false "sess-enable-replace")"
     [ "$status" -eq 0 ]
     reason="$(jq -r '.reason' <<<"$output")"
-    [[ "$reason" == *"bb handoff coordinator enable --self --rotate-at 100000"*"--replace"* ]]
+    [[ "$reason" == *"bb handoff coordinator enable --self --rotate-at 90000"*"--replace"* ]]
 }
