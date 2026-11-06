@@ -29,22 +29,7 @@ setup() {
     export BB_THREAD_ID="thr_test0001"
     unset INTERPULSE_COORD_HOOK
     unset INTERPULSE_COORD_CONTEXT_TOKENS
-    unset CLAVAIN_COORDINATOR_MODEL_CMD
     unset INTERPULSE_COORD_TIME_BUDGET_S
-    # Keep find_clavain_coordinator_model()'s fallback lookup hermetic: point
-    # it at locations that do not exist rather than this host's real
-    # ~/.claude/plugins files, so these tests never depend on what happens to
-    # be installed on the machine running them.
-    export CLAVAIN_INSTALLED_FILE="$STATE_DIR/no-such-installed_plugins.json"
-    export CLAUDE_PLUGIN_CACHE_ROOT="$STATE_DIR/no-such-cache"
-
-    # coordinator-model.sh stub: resolves to Sonnet, matching the real
-    # external script's stdout contract ("<bb-provider> <model>").
-    cat > "$STUB_DIR/coordinator-model.sh" <<'EOF'
-#!/usr/bin/env bash
-printf 'claude-code claude-sonnet-5\n'
-EOF
-    chmod +x "$STUB_DIR/coordinator-model.sh"
 }
 
 teardown() {
@@ -74,6 +59,10 @@ fi
 if [[ "\$1 \$2" == "thread context" ]]; then
     printf '%s\n' '$context_json'
     exit ${context_exit_code}
+fi
+if [[ "\$1 \$2" == "thread show" ]]; then
+    if [[ -f "$STATE_DIR/show.json" ]]; then cat "$STATE_DIR/show.json"; else jq -nc --arg t "\${STUB_TITLE:-coord}" '{thread:{title:\$t}}'; fi
+    exit \${STUB_SHOW_EXIT:-0}
 fi
 exit 1
 EOF
@@ -109,22 +98,6 @@ hook_input() {  # $1 = transcript path, $2 = stop_hook_active (true/false), $3 =
     [ -z "$output" ]
 }
 
-@test "coordinator-handoff: coordinator above threshold on Opus blocks with enable before replace, naming sonnet and 90000" {
-    make_bb_stub '{"marking":{},"rotationEnabled":false}'
-    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-block")"
-    [ "$status" -eq 0 ]
-    decision="$(jq -r '.decision' <<<"$output")"
-    reason="$(jq -r '.reason' <<<"$output")"
-    [ "$decision" = "block" ]
-    [[ "$reason" == *"claude-sonnet-5"* ]]
-    [[ "$reason" == *"90000"* ]]
-    [[ "$reason" == *"bb handoff --self --to claude-code --model claude-sonnet-5 --replace"* ]]
-    [[ "$reason" == *"bb handoff coordinator enable --self --rotate-at 90000"* ]]
-    # enable must be listed before --replace: --replace archives the source
-    # thread, so a --self command after it would resolve to the archive.
-    [[ "$reason" == *"bb handoff coordinator enable --self --rotate-at 90000"*"bb handoff --self --to claude-code --model claude-sonnet-5 --replace"* ]]
-}
-
 @test "coordinator-handoff: default threshold is the 90000 named constant, so a 95k coordinator blocks" {
     grep -qx 'INTERPULSE_COORD_CONTEXT_DEFAULT=90000' "$BATS_TEST_DIRNAME/../../lib/interpulse-lib.sh"
     make_bb_stub '{"marking":{},"rotationEnabled":false}'
@@ -147,18 +120,6 @@ hook_input() {  # $1 = transcript path, $2 = stop_hook_active (true/false), $3 =
     run bash "$HOOK" <<< "$(hook_input "$FIXTURES/105k-sonnet.jsonl")"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
-}
-
-@test "coordinator-handoff: rotation enabled but still stuck a full band later blocks with a same-model replace" {
-    make_bb_stub '{"marking":{"rotateAt":90000},"rotationEnabled":true}'
-    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/160k-sonnet.jsonl")"
-    [ "$status" -eq 0 ]
-    [ -n "$output" ]
-    decision="$(jq -r '.decision' <<<"$output")"
-    reason="$(jq -r '.reason' <<<"$output")"
-    [ "$decision" = "block" ]
-    [[ "$reason" == *"bb handoff --self --to claude-code --model claude-sonnet-5 --replace"* ]]
-    [[ "$reason" != *"coordinator enable"* ]]
 }
 
 @test "coordinator-handoff: fractional rotateAt against a live 1000000 window blocks" {
@@ -210,7 +171,7 @@ hook_input() {  # $1 = transcript path, $2 = stop_hook_active (true/false), $3 =
     [ "$status" -eq 0 ]
     [ -z "$output" ]
     calls="$(wc -l < "$STATE_DIR/bb-calls")"
-    [ "$calls" -eq 1 ]
+    [ "$calls" -eq 2 ]   # status + title lookup, once
 }
 
 @test "coordinator-handoff: a bb timeout is silent and exits 0" {
@@ -278,68 +239,6 @@ hook_input() {  # $1 = transcript path, $2 = stop_hook_active (true/false), $3 =
     [ ! -e "$STATE_DIR/bb-calls" ]
 }
 
-@test "coordinator-handoff: a resolver that ignores SIGTERM is killed within the hard bound" {
-    cat > "$STUB_DIR/coordinator-model.sh" <<'EOF'
-#!/usr/bin/env bash
-trap '' TERM
-sleep 20
-EOF
-    chmod +x "$STUB_DIR/coordinator-model.sh"
-    make_bb_stub '{"marking":{},"rotationEnabled":false}'
-    start=$SECONDS
-    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-termresolver")"
-    elapsed=$(( SECONDS - start ))
-    [ "$status" -eq 0 ]
-    [ "$elapsed" -lt 8 ]
-    [ "$(jq -r '.decision' <<<"$output")" = "block" ]
-}
-
-@test "coordinator-handoff: rotation enabled between bands is re-read, not frozen from the first check" {
-    COUNTER="$STATE_DIR/status-calls"
-    cat > "$STUB_DIR/bb" <<EOF
-#!/usr/bin/env bash
-echo "\$*" >> "$STATE_DIR/bb-calls"
-if [[ "\$1 \$2 \$3" == "handoff coordinator status" ]]; then
-    n=0
-    [[ -f "$COUNTER" ]] && n="\$(cat "$COUNTER")"
-    n=\$((n + 1))
-    echo "\$n" > "$COUNTER"
-    if [[ "\$n" -eq 1 ]]; then
-        printf '%s\n' '{"marking":{},"rotationEnabled":false}'
-    else
-        printf '%s\n' '{"marking":{"rotateAt":90000},"rotationEnabled":true}'
-    fi
-    exit 0
-fi
-if [[ "\$1 \$2" == "thread list" ]]; then
-    printf '%s\n' '[]'
-    exit 0
-fi
-if [[ "\$1 \$2" == "thread context" ]]; then
-    printf '%s\n' '{"usage":{"modelContextWindow":200000}}'
-    exit 0
-fi
-exit 1
-EOF
-    chmod +x "$STUB_DIR/bb"
-
-    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/105k-sonnet.jsonl" false "sess-reread")"
-    [ "$status" -eq 0 ]
-    decision="$(jq -r '.decision' <<<"$output")"
-    reason1="$(jq -r '.reason' <<<"$output")"
-    [ "$decision" = "block" ]
-    [[ "$reason1" == *"coordinator enable"* ]]
-    [[ "$reason1" == *"coordinator enable"*"--replace"* ]]
-
-    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/160k-sonnet.jsonl" false "sess-reread")"
-    [ "$status" -eq 0 ]
-    decision="$(jq -r '.decision' <<<"$output")"
-    reason2="$(jq -r '.reason' <<<"$output")"
-    [ "$decision" = "block" ]
-    [[ "$reason2" == *"--replace"* ]]
-    [[ "$reason2" != *"coordinator enable"* ]]
-}
-
 @test "coordinator-handoff: a thread that gains children becomes a coordinator in a later band" {
     COUNTER="$STATE_DIR/list-calls"
     cat > "$STUB_DIR/bb" <<EOF
@@ -364,6 +263,10 @@ fi
 if [[ "\$1 \$2" == "thread context" ]]; then
     printf '%s\n' '{"usage":{"modelContextWindow":200000}}'
     exit 0
+fi
+if [[ "\$1 \$2" == "thread show" ]]; then
+    if [[ -f "$STATE_DIR/show.json" ]]; then cat "$STATE_DIR/show.json"; else jq -nc --arg t "\${STUB_TITLE:-coord}" '{thread:{title:\$t}}'; fi
+    exit \${STUB_SHOW_EXIT:-0}
 fi
 exit 1
 EOF
@@ -397,6 +300,10 @@ if [[ "\$1 \$2" == "thread list" ]]; then
 fi
 if [[ "\$1 \$2" == "thread context" ]]; then
     exit 1
+fi
+if [[ "\$1 \$2" == "thread show" ]]; then
+    if [[ -f "$STATE_DIR/show.json" ]]; then cat "$STATE_DIR/show.json"; else jq -nc --arg t "\${STUB_TITLE:-coord}" '{thread:{title:\$t}}'; fi
+    exit \${STUB_SHOW_EXIT:-0}
 fi
 exit 1
 EOF
@@ -461,103 +368,6 @@ EOF
     [ -n "$output" ]
     decision="$(jq -r '.decision // empty' <<<"$output")"
     [ "$decision" = "block" ]
-}
-
-@test "coordinator-handoff: model resolver missing does not silence a known over-threshold coordinator" {
-    rm -f "$STUB_DIR/coordinator-model.sh"
-    make_bb_stub '{"marking":{},"rotationEnabled":false}'
-    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-noresolver")"
-    [ "$status" -eq 0 ]
-    [ -n "$output" ]
-    decision="$(jq -r '.decision' <<<"$output")"
-    reason="$(jq -r '.reason' <<<"$output")"
-    [ "$decision" = "block" ]
-    [[ "$reason" == *"claude-sonnet-5"* ]]
-    [[ "$reason" != *"opus"* ]]
-}
-
-# --- P2-7: each fake resolver prints a distinct marker model, so a broken
-#     lookup (e.g. one that fell through to the hardcoded fallback instead of
-#     actually finding/running the fake root) is caught instead of passing
-#     coincidentally. ---------------------------------------------------------
-
-@test "coordinator-handoff: resolver not on PATH is found via a fake installed_plugins.json Clavain root" {
-    rm -f "$STUB_DIR/coordinator-model.sh"
-
-    local fake_root="$STATE_DIR/fake-cache/interagency-marketplace/clavain/0.6.999"
-    mkdir -p "$fake_root/scripts" "$fake_root/.claude-plugin"
-    cat > "$fake_root/scripts/coordinator-model.sh" <<'EOF'
-#!/usr/bin/env bash
-printf 'claude-code claude-sonnet-5-lookupa\n'
-EOF
-    chmod +x "$fake_root/scripts/coordinator-model.sh"
-    printf '{"name":"clavain","version":"0.6.999"}\n' > "$fake_root/.claude-plugin/plugin.json"
-
-    cat > "$CLAVAIN_INSTALLED_FILE" <<EOF
-{
-  "version": 2,
-  "plugins": {
-    "clavain@interagency-marketplace": [
-      {"scope": "user", "installPath": "$fake_root", "version": "0.6.999"}
-    ]
-  }
-}
-EOF
-
-    make_bb_stub '{"marking":{},"rotationEnabled":false}'
-    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-fakeroot-installed")"
-    [ "$status" -eq 0 ]
-    [ -n "$output" ]
-    decision="$(jq -r '.decision' <<<"$output")"
-    reason="$(jq -r '.reason' <<<"$output")"
-    [ "$decision" = "block" ]
-    [[ "$reason" == *"claude-sonnet-5-lookupa"* ]]
-}
-
-@test "coordinator-handoff: resolver not on PATH falls back to a plugin-cache glob when installed_plugins.json has no clavain entry" {
-    rm -f "$STUB_DIR/coordinator-model.sh"
-    # No CLAVAIN_INSTALLED_FILE at all -- lookup #1 must come up empty and
-    # fall through to the cache glob, not error out.
-    rm -f "$CLAVAIN_INSTALLED_FILE"
-
-    local older="$CLAUDE_PLUGIN_CACHE_ROOT/interagency-marketplace/clavain/0.6.1"
-    local newer="$CLAUDE_PLUGIN_CACHE_ROOT/interagency-marketplace/clavain/0.6.999"
-    mkdir -p "$older/scripts" "$older/.claude-plugin" "$newer/scripts" "$newer/.claude-plugin"
-    printf '#!/usr/bin/env bash\nprintf "claude-code claude-sonnet-5-lookupold\\n"\n' > "$older/scripts/coordinator-model.sh"
-    chmod +x "$older/scripts/coordinator-model.sh"
-    printf '{"name":"clavain","version":"0.6.1"}\n' > "$older/.claude-plugin/plugin.json"
-    touch -d '1 hour ago' "$older" 2>/dev/null || true
-    cat > "$newer/scripts/coordinator-model.sh" <<'EOF'
-#!/usr/bin/env bash
-printf 'claude-code claude-sonnet-5-lookupnew\n'
-EOF
-    chmod +x "$newer/scripts/coordinator-model.sh"
-    printf '{"name":"clavain","version":"0.6.999"}\n' > "$newer/.claude-plugin/plugin.json"
-    touch "$newer"   # unambiguously the most recently modified match
-
-    make_bb_stub '{"marking":{},"rotationEnabled":false}'
-    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-fakeroot-cache")"
-    [ "$status" -eq 0 ]
-    [ -n "$output" ]
-    decision="$(jq -r '.decision' <<<"$output")"
-    reason="$(jq -r '.reason' <<<"$output")"
-    [ "$decision" = "block" ]
-    [[ "$reason" == *"claude-sonnet-5-lookupnew"* ]]
-    [[ "$reason" != *"lookupold"* ]]
-}
-
-@test "coordinator-handoff: model resolver returning Opus is never honored" {
-    cat > "$STUB_DIR/coordinator-model.sh" <<'EOF'
-#!/usr/bin/env bash
-printf 'claude-code claude-opus-5-5\n'
-EOF
-    chmod +x "$STUB_DIR/coordinator-model.sh"
-    make_bb_stub '{"marking":{},"rotationEnabled":false}'
-    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-refuseopus")"
-    [ "$status" -eq 0 ]
-    reason="$(jq -r '.reason' <<<"$output")"
-    [[ "$reason" == *"claude-sonnet-5"* ]]
-    [[ "$reason" != *"claude-opus-5-5"* ]]
 }
 
 @test "coordinator-handoff: an unwritable state dir does not abort the whole determination" {
@@ -709,7 +519,7 @@ EOF
 
 # --- P2-4: total runtime must stay comfortably under the hooks.json timeout -
 
-@test "coordinator-handoff: slow bb/resolver calls still finish well under the hooks.json timeout" {
+@test "coordinator-handoff: slow bb calls still finish well under the hooks.json timeout" {
     # Each external call sleeps just under the 1s per-call `timeout` cap
     # (P2-4) -- long enough to give the total elapsed time real weight
     # (unlike every other test's instant stubs), but short enough that
@@ -718,8 +528,8 @@ EOF
     # lookup fails -> the hook goes silent by design, per the "a bb timeout
     # is silent" test above) rather than the runtime-budget path this test
     # means to cover. This scenario forces all three external calls in one
-    # Stop: status (fractional rotateAt forces a context-window lookup) and
-    # the model resolver.
+    # Stop: status (fractional rotateAt forces a context-window lookup), the
+    # context window, and the title lookup.
     cat > "$STUB_DIR/bb" <<EOF
 #!/usr/bin/env bash
 echo "\$*" >> "$STATE_DIR/bb-calls"
@@ -737,76 +547,139 @@ if [[ "\$1 \$2" == "thread context" ]]; then
     printf '%s\n' '{"usage":{"modelContextWindow":200000}}'
     exit 0
 fi
+if [[ "\$1 \$2" == "thread show" ]]; then
+    if [[ -f "$STATE_DIR/show.json" ]]; then cat "$STATE_DIR/show.json"; else jq -nc --arg t "\${STUB_TITLE:-coord}" '{thread:{title:\$t}}'; fi
+    exit \${STUB_SHOW_EXIT:-0}
+fi
 exit 1
 EOF
     chmod +x "$STUB_DIR/bb"
-    cat > "$STUB_DIR/coordinator-model.sh" <<'EOF'
-#!/usr/bin/env bash
-sleep 0.8
-printf 'claude-code claude-sonnet-5\n'
-EOF
-    chmod +x "$STUB_DIR/coordinator-model.sh"
 
     start=$(date +%s)
     run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-slowbudget")"
     elapsed=$(( $(date +%s) - start ))
 
     [ "$status" -eq 0 ]
-    [ -n "$output" ]
-    decision="$(jq -r '.decision' <<<"$output")"
-    [ "$decision" = "block" ]
+    # 0.3 x 200000 = 60000: enabled, but 70k tokens past it, so the note path.
+    [ "$(jq -r "has(\"systemMessage\")" <<<"$output")" = "true" ]
     [ "$elapsed" -lt 8 ]
 }
 
-# --- P3: resolver output allowlist (injection / unknown provider) ----------
 
-@test "coordinator-handoff: resolver output containing shell metacharacters falls back to the hardcoded model" {
-    cat > "$STUB_DIR/coordinator-model.sh" <<'EOF'
-#!/usr/bin/env bash
-printf 'claude-code claude-sonnet-5; rm -rf /\n'
-EOF
-    chmod +x "$STUB_DIR/coordinator-model.sh"
-    make_bb_stub '{"marking":{},"rotationEnabled":false}'
-    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-injectmodel")"
+
+@test "coordinator-handoff: a coordinator with rotation off is told to enable at the threshold, with no replace and no model" {
+    make_bb_stub '{"marking":{"seedTokens":30000},"rotationEnabled":false}'
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-block")"
     [ "$status" -eq 0 ]
+    [ "$(jq -r '.decision' <<<"$output")" = "block" ]
     reason="$(jq -r '.reason' <<<"$output")"
-    [[ "$reason" == *"bb handoff --self --to claude-code --model claude-sonnet-5 --replace"* ]]
-    [[ "$reason" != *"rm -rf"* ]]
-    [[ "$reason" != *";"* ]]
+    [[ "$reason" == *"bb handoff coordinator enable --self --rotate-at 90000"* ]]
+    [[ "$reason" != *"--replace"* ]]
+    [[ "$reason" != *"--model"* ]]
+    [[ "$reason" != *"claude-sonnet"* ]]
 }
 
-@test "coordinator-handoff: an unknown provider from the resolver falls back to claude-code" {
-    cat > "$STUB_DIR/coordinator-model.sh" <<'EOF'
-#!/usr/bin/env bash
-printf 'some-other-provider claude-sonnet-5\n'
-EOF
-    chmod +x "$STUB_DIR/coordinator-model.sh"
-    make_bb_stub '{"marking":{},"rotationEnabled":false}'
-    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-unknownprovider")"
+@test "coordinator-handoff: a seed over half the threshold raises --rotate-at to 2x the seed" {
+    make_bb_stub '{"marking":{"seedTokens":55219,"rotateAt":50000},"rotationEnabled":true,"lastDeclineReason":"threshold-below-seed"}'
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-seed")"
     [ "$status" -eq 0 ]
+    [ "$(jq -r '.decision' <<<"$output")" = "block" ]
     reason="$(jq -r '.reason' <<<"$output")"
-    [[ "$reason" == *"--to claude-code --model claude-sonnet-5"* ]]
-    [[ "$reason" != *"some-other-provider"* ]]
+    [[ "$reason" == *"enable --self --rotate-at 110438"* ]]
+    [[ "$reason" != *"--replace"* ]]
 }
 
-# --- P3: dated-snapshot model suffix must not defeat the MODEL_OK compare ---
+@test "coordinator-handoff: rotate-at below 2x the seed is not trusted even when under the threshold" {
+    make_bb_stub '{"marking":{"seedTokens":60000,"rotateAt":90000},"rotationEnabled":true}'
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/105k-sonnet.jsonl" false "sess-below")"
+    [ "$status" -eq 0 ]
+    [ "$(jq -r '.decision' <<<"$output")" = "block" ]
+    [[ "$(jq -r '.reason' <<<"$output")" == *"--rotate-at 120000"* ]]
+}
 
-@test "coordinator-handoff: rotation-ok coordinator on a dated model snapshot still matches the resolver's undated alias" {
-    # Same shape as "rotation enabled just past rotate-at (first band) stays
-    # silent", but the transcript records a dated snapshot id
-    # (claude-sonnet-5-20260315) while the resolver returns the undated alias
-    # (claude-sonnet-5). Without suffix normalization MODEL_OK would be false,
-    # forcing a spurious --replace even though rotation is otherwise fine.
-    make_bb_stub '{"marking":{"rotateAt":90000},"rotationEnabled":true}'
-    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/105k-sonnet-dated.jsonl")"
+@test "coordinator-handoff: rotate-at at 2x the seed is accepted and stays silent in the first band" {
+    make_bb_stub '{"marking":{"seedTokens":50000,"rotateAt":100000},"rotationEnabled":true}'
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/105k-sonnet.jsonl" false "sess-ok2x")"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
 
-@test "coordinator-handoff: a Sonnet coordinator with rotation off gets enable AND the ready replace command" {
-    make_bb_stub '{"marking":{},"rotationEnabled":false}'
-    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-sonnet.jsonl" false "sess-enable-replace")"
+@test "coordinator-handoff: rotation enabled but not rotated a full band later gets a non-blocking note, never a replace" {
+    make_bb_stub '{"marking":{"rotateAt":90000},"rotationEnabled":true,"lastDeclineReason":"not-idle"}'
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/160k-sonnet.jsonl" false "sess-stuck")"
     [ "$status" -eq 0 ]
-    reason="$(jq -r '.reason' <<<"$output")"
-    [[ "$reason" == *"bb handoff coordinator enable --self --rotate-at 90000"*"--replace"* ]]
+    [ "$(jq -r 'has("decision")' <<<"$output")" = "false" ]
+    msg="$(jq -r '.systemMessage' <<<"$output")"
+    [[ "$msg" == *"not-idle"* ]]
+    [[ "$msg" != *"--replace"* ]]
+}
+
+@test "coordinator-handoff: the vizier thread is never advised" {
+    make_bb_stub '{"marking":{"seedTokens":55000},"rotationEnabled":false}'
+    export STUB_TITLE="Masaq' | vizier"
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-vizier")"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "coordinator-handoff: rotation enabled between bands is re-read, not frozen from the first check" {
+    COUNTER="$STATE_DIR/status-calls"
+    cat > "$STUB_DIR/bb" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "$STATE_DIR/bb-calls"
+if [[ "\$1 \$2 \$3" == "handoff coordinator status" ]]; then
+    n=0
+    [[ -f "$COUNTER" ]] && n="\$(cat "$COUNTER")"
+    n=\$((n + 1))
+    echo "\$n" > "$COUNTER"
+    if [[ "\$n" -eq 1 ]]; then
+        printf '%s\n' '{"marking":{},"rotationEnabled":false}'
+    else
+        printf '%s\n' '{"marking":{"rotateAt":90000},"rotationEnabled":true}'
+    fi
+    exit 0
+fi
+if [[ "\$1 \$2" == "thread show" ]]; then
+    if [[ -f "$STATE_DIR/show.json" ]]; then cat "$STATE_DIR/show.json"; else jq -nc --arg t "\${STUB_TITLE:-coord}" '{thread:{title:\$t}}'; fi
+    exit \${STUB_SHOW_EXIT:-0}
+fi
+exit 1
+EOF
+    chmod +x "$STUB_DIR/bb"
+
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/105k-sonnet.jsonl" false "sess-reread")"
+    [ "$(jq -r '.decision' <<<"$output")" = "block" ]
+    [[ "$(jq -r '.reason' <<<"$output")" == *"coordinator enable"* ]]
+
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/160k-sonnet.jsonl" false "sess-reread")"
+    [ "$status" -eq 0 ]
+    [ "$(jq -r 'has("decision")' <<<"$output")" = "false" ]
+    [[ "$(jq -r '.systemMessage' <<<"$output")" == *"no manual handoff"* ]]
+}
+
+@test "coordinator-handoff: a failed title lookup is silent, keeps the band unconsumed, and the next Stop retries" {
+    make_bb_stub '{"marking":{"seedTokens":55000},"rotationEnabled":false}'
+    export STUB_SHOW_EXIT=1
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-title-fail")"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ -z "$(ls -A "$STATE_DIR" | grep band)" ]
+    unset STUB_SHOW_EXIT
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-title-fail")"
+    [ "$(jq -r '.decision' <<<"$output")" = "block" ]
+}
+
+@test "coordinator-handoff: a malformed title response ({}, null, non-string) is silent and unpersisted, then recovers" {
+    make_bb_stub '{"marking":{"seedTokens":55000},"rotationEnabled":false}'
+    for bad in '{}' '{"thread":{"title":null}}' '{"thread":{"title":5}}' '{"thread":{}}'; do
+        printf '%s\n' "$bad" > "$STATE_DIR/show.json"
+        rm -f "$STATE_DIR"/*.band
+        run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-title-bad")"
+        [ "$status" -eq 0 ]
+        [ -z "$output" ]
+        [ -z "$(ls -A "$STATE_DIR" | grep band)" ]
+    done
+    printf '%s\n' '{"thread":{"title":"coord"}}' > "$STATE_DIR/show.json"
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-title-bad")"
+    [ "$(jq -r '.decision' <<<"$output")" = "block" ]
 }
