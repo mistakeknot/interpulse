@@ -61,7 +61,7 @@ if [[ "\$1 \$2" == "thread context" ]]; then
     exit ${context_exit_code}
 fi
 if [[ "\$1 \$2" == "thread show" ]]; then
-    jq -nc --arg t "\${STUB_TITLE:-coord}" '{thread:{title:\$t}}'
+    if [[ -f "$STATE_DIR/show.json" ]]; then cat "$STATE_DIR/show.json"; else jq -nc --arg t "\${STUB_TITLE:-coord}" '{thread:{title:\$t}}'; fi
     exit \${STUB_SHOW_EXIT:-0}
 fi
 exit 1
@@ -265,7 +265,7 @@ if [[ "\$1 \$2" == "thread context" ]]; then
     exit 0
 fi
 if [[ "\$1 \$2" == "thread show" ]]; then
-    jq -nc --arg t "\${STUB_TITLE:-coord}" '{thread:{title:\$t}}'
+    if [[ -f "$STATE_DIR/show.json" ]]; then cat "$STATE_DIR/show.json"; else jq -nc --arg t "\${STUB_TITLE:-coord}" '{thread:{title:\$t}}'; fi
     exit \${STUB_SHOW_EXIT:-0}
 fi
 exit 1
@@ -302,7 +302,7 @@ if [[ "\$1 \$2" == "thread context" ]]; then
     exit 1
 fi
 if [[ "\$1 \$2" == "thread show" ]]; then
-    jq -nc --arg t "\${STUB_TITLE:-coord}" '{thread:{title:\$t}}'
+    if [[ -f "$STATE_DIR/show.json" ]]; then cat "$STATE_DIR/show.json"; else jq -nc --arg t "\${STUB_TITLE:-coord}" '{thread:{title:\$t}}'; fi
     exit \${STUB_SHOW_EXIT:-0}
 fi
 exit 1
@@ -548,7 +548,7 @@ if [[ "\$1 \$2" == "thread context" ]]; then
     exit 0
 fi
 if [[ "\$1 \$2" == "thread show" ]]; then
-    jq -nc --arg t "\${STUB_TITLE:-coord}" '{thread:{title:\$t}}'
+    if [[ -f "$STATE_DIR/show.json" ]]; then cat "$STATE_DIR/show.json"; else jq -nc --arg t "\${STUB_TITLE:-coord}" '{thread:{title:\$t}}'; fi
     exit \${STUB_SHOW_EXIT:-0}
 fi
 exit 1
@@ -640,7 +640,7 @@ if [[ "\$1 \$2 \$3" == "handoff coordinator status" ]]; then
     exit 0
 fi
 if [[ "\$1 \$2" == "thread show" ]]; then
-    jq -nc --arg t "\${STUB_TITLE:-coord}" '{thread:{title:\$t}}'
+    if [[ -f "$STATE_DIR/show.json" ]]; then cat "$STATE_DIR/show.json"; else jq -nc --arg t "\${STUB_TITLE:-coord}" '{thread:{title:\$t}}'; fi
     exit \${STUB_SHOW_EXIT:-0}
 fi
 exit 1
@@ -666,5 +666,20 @@ EOF
     [ -z "$(ls -A "$STATE_DIR" | grep band)" ]
     unset STUB_SHOW_EXIT
     run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-title-fail")"
+    [ "$(jq -r '.decision' <<<"$output")" = "block" ]
+}
+
+@test "coordinator-handoff: a malformed title response ({}, null, non-string) is silent and unpersisted, then recovers" {
+    make_bb_stub '{"marking":{"seedTokens":55000},"rotationEnabled":false}'
+    for bad in '{}' '{"thread":{"title":null}}' '{"thread":{"title":5}}' '{"thread":{}}'; do
+        printf '%s\n' "$bad" > "$STATE_DIR/show.json"
+        rm -f "$STATE_DIR"/*.band
+        run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-title-bad")"
+        [ "$status" -eq 0 ]
+        [ -z "$output" ]
+        [ -z "$(ls -A "$STATE_DIR" | grep band)" ]
+    done
+    printf '%s\n' '{"thread":{"title":"coord"}}' > "$STATE_DIR/show.json"
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-title-bad")"
     [ "$(jq -r '.decision' <<<"$output")" = "block" ]
 }

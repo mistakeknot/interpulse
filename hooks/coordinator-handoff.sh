@@ -339,7 +339,9 @@ if [[ "$IS_COORDINATOR" == "true" ]]; then
     # persisting the band so the next Stop retries (never block the vizier on
     # a hiccup, never consume the band).
     TITLE_JSON="$("${TIMEOUT_CMD[@]}" bb thread show "$BB_THREAD_ID" --json 2>/dev/null)" || exit 0
-    TITLE="$(jq -r '.thread.title // empty' <<<"$TITLE_JSON" 2>/dev/null)" || exit 0
+    # The title must be present as a string; {}, null or a non-string is a
+    # malformed response and equally undetermined.
+    TITLE="$(jq -er 'if (.thread.title | type) == "string" then .thread.title else error("no title") end' <<<"$TITLE_JSON" 2>/dev/null)" || exit 0
     case "$TITLE" in
         "Masaq' | vizier"*) _persist_band; exit 0 ;;
     esac
