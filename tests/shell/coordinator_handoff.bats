@@ -6,11 +6,11 @@ bats_require_minimum_version 1.5.0
 # The hook is a Stop hook. It measures REAL transcript context from the last
 # main-chain assistant record (via lib/interpulse-lib.sh's
 # _ip_transcript_tokens), and for bb sessions above
-# INTERPULSE_COORD_CONTEXT_TOKENS (default 90000, INTERPULSE_COORD_CONTEXT_DEFAULT):
+# INTERPULSE_COORD_CONTEXT_TOKENS (default 100000, INTERPULSE_COORD_CONTEXT_DEFAULT):
 #   - a coordinator thread gets a blocking decision naming the exact
-#     `bb handoff` commands, unless rotation is already enabled at or under
-#     the threshold AND still within the first 25k-token band since
-#     rotate-at;
+#     `bb handoff` commands, unless rotation is already enabled at any value
+#     of at least 2x the seed (however high) AND context is still within
+#     the first 25k-token band since rotate-at;
 #   - a worker thread gets an advisory systemMessage, never a block.
 #
 # Every failure path is silent, exit 0. The band file is only written after a
@@ -98,21 +98,25 @@ hook_input() {  # $1 = transcript path, $2 = stop_hook_active (true/false), $3 =
     [ -z "$output" ]
 }
 
-@test "coordinator-handoff: default threshold is the 90000 named constant, so a 95k coordinator blocks" {
-    grep -qx 'INTERPULSE_COORD_CONTEXT_DEFAULT=90000' "$BATS_TEST_DIRNAME/../../lib/interpulse-lib.sh"
+@test "coordinator-handoff: default threshold is the 100000 named constant: 95k is silent, 105k blocks" {
+    grep -qx 'INTERPULSE_COORD_CONTEXT_DEFAULT=100000' "$BATS_TEST_DIRNAME/../../lib/interpulse-lib.sh"
     make_bb_stub '{"marking":{},"rotationEnabled":false}'
     run bash "$HOOK" <<< "$(hook_input "$FIXTURES/95k-sonnet.jsonl" false "sess-95k")"
     [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/105k-sonnet.jsonl" false "sess-105k")"
+    [ "$status" -eq 0 ]
     [ "$(jq -r '.decision' <<<"$output")" = "block" ]
-    [[ "$(jq -r '.reason' <<<"$output")" == *"bb handoff coordinator enable --self --rotate-at 90000"* ]]
+    [[ "$(jq -r '.reason' <<<"$output")" == *"bb handoff coordinator enable --self --rotate-at 100000"* ]]
 }
 
-@test "coordinator-handoff: INTERPULSE_COORD_CONTEXT_TOKENS still overrides the default (95k under a 100000 override is silent)" {
+@test "coordinator-handoff: INTERPULSE_COORD_CONTEXT_TOKENS still overrides the default (95k under a 90000 override blocks)" {
     make_bb_stub '{"marking":{},"rotationEnabled":false}'
-    export INTERPULSE_COORD_CONTEXT_TOKENS=100000
+    export INTERPULSE_COORD_CONTEXT_TOKENS=90000
     run bash "$HOOK" <<< "$(hook_input "$FIXTURES/95k-sonnet.jsonl" false "sess-95k-override")"
     [ "$status" -eq 0 ]
-    [ -z "$output" ]
+    [ "$(jq -r '.decision' <<<"$output")" = "block" ]
+    [[ "$(jq -r '.reason' <<<"$output")" == *"--rotate-at 90000"* ]]
 }
 
 @test "coordinator-handoff: rotation enabled just past rotate-at (first band) stays silent" {
@@ -122,14 +126,12 @@ hook_input() {  # $1 = transcript path, $2 = stop_hook_active (true/false), $3 =
     [ -z "$output" ]
 }
 
-@test "coordinator-handoff: fractional rotateAt against a live 1000000 window blocks" {
+@test "coordinator-handoff: fractional rotateAt scaling to a high value (0.3 x 1000000 window = 300000) is trusted and stays silent below it" {
     make_bb_stub '{"marking":{"rotateAt":0.3},"rotationEnabled":true}' '[]' 0 0 \
         '{"usage":{"modelContextWindow":1000000}}'
     run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-sonnet.jsonl")"
     [ "$status" -eq 0 ]
-    [ -n "$output" ]
-    decision="$(jq -r '.decision' <<<"$output")"
-    [ "$decision" = "block" ]
+    [ -z "$output" ]
 }
 
 @test "coordinator-handoff: fractional rotateAt against a live 300000 window, still in the first band, stays silent" {
@@ -573,7 +575,7 @@ EOF
     [ "$status" -eq 0 ]
     [ "$(jq -r '.decision' <<<"$output")" = "block" ]
     reason="$(jq -r '.reason' <<<"$output")"
-    [[ "$reason" == *"bb handoff coordinator enable --self --rotate-at 90000"* ]]
+    [[ "$reason" == *"bb handoff coordinator enable --self --rotate-at 100000"* ]]
     [[ "$reason" != *"--replace"* ]]
     [[ "$reason" != *"--model"* ]]
     [[ "$reason" != *"claude-sonnet"* ]]
@@ -602,6 +604,85 @@ EOF
     run bash "$HOOK" <<< "$(hook_input "$FIXTURES/105k-sonnet.jsonl" false "sess-ok2x")"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
+}
+
+# --- rotate-at above the hook threshold (bead mk-4dk5r) ---------------------
+# Any enabled rotate-at >= 2x the seed is trusted whatever its value: silent
+# until context is 25000 past it, then flagged. The hook never advises lowering
+# it to its own threshold.
+
+@test "coordinator-handoff: rotate-at above the old 90000 default and the threshold stays silent below rotate-at + 25000" {
+    make_bb_stub '{"marking":{"seedTokens":7308,"rotateAt":99234},"rotationEnabled":true}'
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/105k-sonnet.jsonl" false "sess-hi-silent")"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "coordinator-handoff: a high rotate-at (160000) stays silent while context is below it" {
+    make_bb_stub '{"marking":{"seedTokens":7308,"rotateAt":160000},"rotationEnabled":true}'
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-160-below")"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "coordinator-handoff: rotate-at above the threshold is silent just under rotate-at + 25000" {
+    # 130000 - 105001 = 24999
+    make_bb_stub '{"marking":{"seedTokens":7308,"rotateAt":105001},"rotationEnabled":true}'
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-hi-edge-under")"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "coordinator-handoff: rotate-at above the threshold is flagged exactly at rotate-at + 25000, as a note, never a lower-it block" {
+    # 130000 - 105000 = 25000
+    make_bb_stub '{"marking":{"seedTokens":7308,"rotateAt":105000},"rotationEnabled":true,"lastDeclineReason":"not-idle"}'
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-hi-edge-at")"
+    [ "$status" -eq 0 ]
+    [ "$(jq -r 'has("decision")' <<<"$output")" = "false" ]
+    msg="$(jq -r '.systemMessage' <<<"$output")"
+    [[ "$msg" == *"rotation is enabled at 105000"* ]]
+    [[ "$msg" == *"not-idle"* ]]
+    [[ "$msg" != *"--rotate-at"* ]]
+}
+
+@test "coordinator-handoff: rotate-at above the threshold is flagged well past rotate-at + 25000" {
+    make_bb_stub '{"marking":{"seedTokens":7308,"rotateAt":99234},"rotationEnabled":true}'
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/160k-sonnet.jsonl" false "sess-hi-past")"
+    [ "$status" -eq 0 ]
+    [ "$(jq -r 'has("decision")' <<<"$output")" = "false" ]
+    [[ "$(jq -r '.systemMessage' <<<"$output")" == *"rotation is enabled at 99234"* ]]
+}
+
+@test "coordinator-handoff: rotate-at below 2x the seed is still flagged even when it is above the threshold" {
+    # 2 x 60000 = 120000 > rotate-at 110000: bb would decline, so advise 2x seed.
+    make_bb_stub '{"marking":{"seedTokens":60000,"rotateAt":110000},"rotationEnabled":true}'
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-below-seed-hi")"
+    [ "$status" -eq 0 ]
+    [ "$(jq -r '.decision' <<<"$output")" = "block" ]
+    [[ "$(jq -r '.reason' <<<"$output")" == *"--rotate-at 120000"* ]]
+}
+
+@test "coordinator-handoff: rotate-at exactly 2x the seed above the threshold is trusted" {
+    make_bb_stub '{"marking":{"seedTokens":60000,"rotateAt":120000},"rotationEnabled":true}'
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-2x-hi")"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "coordinator-handoff: rotation disabled with a high rotate-at on file is still advised to enable at the threshold" {
+    make_bb_stub '{"marking":{"seedTokens":7308,"rotateAt":160000},"rotationEnabled":false}'
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-disabled-hi")"
+    [ "$status" -eq 0 ]
+    [ "$(jq -r '.decision' <<<"$output")" = "block" ]
+    [[ "$(jq -r '.reason' <<<"$output")" == *"--rotate-at 100000"* ]]
+}
+
+@test "coordinator-handoff: rotation enabled with no rotate-at value is still advised to enable at the threshold" {
+    make_bb_stub '{"marking":{"seedTokens":7308},"rotationEnabled":true}'
+    run bash "$HOOK" <<< "$(hook_input "$FIXTURES/130k-opus.jsonl" false "sess-missing-hi")"
+    [ "$status" -eq 0 ]
+    [ "$(jq -r '.decision' <<<"$output")" = "block" ]
+    [[ "$(jq -r '.reason' <<<"$output")" == *"--rotate-at 100000"* ]]
 }
 
 @test "coordinator-handoff: rotation enabled but not rotated a full band later gets a non-blocking note, never a replace" {

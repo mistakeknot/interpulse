@@ -18,7 +18,7 @@
 # excluded so a turn that ends on one of those doesn't measure as 0 and go
 # silent.
 #
-# This is an ABSOLUTE threshold (default 90000 tokens, INTERPULSE_COORD_CONTEXT_DEFAULT), not a percentage of
+# This is an ABSOLUTE threshold (default 100000 tokens, INTERPULSE_COORD_CONTEXT_DEFAULT), not a percentage of
 # the model's context window: context-monitor.sh's existing heuristic
 # Yellow/Orange/Red bands are a percentage of window size and fire far too
 # late on 1M-context models (100k tokens is 10% there, not the "context
@@ -27,7 +27,7 @@
 #
 # Settings:
 #   INTERPULSE_COORD_CONTEXT_TOKENS  threshold, default INTERPULSE_COORD_CONTEXT_DEFAULT
-#                                    (90000, set in lib/interpulse-lib.sh)
+#                                    (100000, set in lib/interpulse-lib.sh)
 #   INTERPULSE_COORD_HOOK=off        disables the hook entirely
 #   INTERPULSE_COORD_STATE_DIR       per-session band-throttle dir (default
 #                                    ~/.interpulse/coordinator-handoff)
@@ -359,11 +359,14 @@ if [[ "$IS_COORDINATOR" == "true" ]]; then
     TARGET="$THRESHOLD"
     (( MIN_ROTATE > TARGET )) && TARGET="$MIN_ROTATE"
 
-    # Configured: enabled at a value bb will honor (>= 2x seed) and no higher
-    # than the target, so rotation fires once context passes it.
+    # Configured: enabled at any value bb will honor (>= 2x seed), however high
+    # it was deliberately set, so rotation fires once context passes it. There
+    # is no upper bound: a rotate-at above this hook's threshold is a valid
+    # choice, and advising the operator to lower it would be wrong (bead
+    # mk-4dk5r).
     ROTATION_CONFIGURED="false"
     if [[ "$ROTATION_ENABLED" == "true" && "$ROTATE_EFFECTIVE" -ge 0 \
-          && "$ROTATE_EFFECTIVE" -ge "$MIN_ROTATE" && "$ROTATE_EFFECTIVE" -le "$TARGET" ]]; then
+          && "$ROTATE_EFFECTIVE" -ge "$MIN_ROTATE" ]]; then
         ROTATION_CONFIGURED="true"
     fi
 
