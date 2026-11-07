@@ -169,15 +169,14 @@ _ip_transcript_tokens() {
 # Default absolute real-context threshold, in tokens, for the coordinator
 # handoff Stop hook and context-monitor.sh's absolute report. Both read it from
 # here, so this is the one place to tune it; INTERPULSE_COORD_CONTEXT_TOKENS
-# still overrides it per session. 90000 rather than 100000: coordinators that
-# rotated past 100k drove the burn spikes this hook exists to stop (bead
-# mk-42j9.13).
-INTERPULSE_COORD_CONTEXT_DEFAULT=90000
+# still overrides it per session. 100000: the 90000 value from the 90k trial
+# (bead mk-42j9.13) is retired now that trial is closed (bead mk-4dk5r).
+INTERPULSE_COORD_CONTEXT_DEFAULT=100000
 
 # Band index for a real-token count above a fixed absolute threshold,
 # matching Clavain's context-handoff.sh band semantics: one band per 25k
 # tokens, counted from zero regardless of where the threshold sits (so
-# 90000/100000/125000 are bands 3/4/5). Prints empty (not 0) when tokens
+# 100000/125000/150000 are bands 4/5/6). Prints empty (not 0) when tokens
 # are below the threshold or not numeric, so callers can distinguish
 # "below threshold" from "band 0" with a single string-emptiness check.
 _ip_absolute_band() {
